@@ -1,4 +1,4 @@
-#include "setup.hpp"
+﻿#include "setup.hpp"
 #include "encoder/encoder.hpp"
 #include "main.h"
 #include "adc.h"
@@ -11,10 +11,9 @@
 #include <stdio.h>
 
 namespace {
-const float kPhaseVoltagePeak = 5.0f; // Phase-to-neutral fundamental peak, volts.
-const float kMaxModulation = 0.7f;
+const float kMaxModulation = 0.95f;
 float electrical_angle = 0.0f;
-
+float electrical_angle_bias = 0.0f;
 }
 
 __align(4) static uint16_t adc_buffer[4];
@@ -22,7 +21,7 @@ static  float I_a = 0;
 static  float I_b = 0;
 static  float I_c = 0;
 volatile float Udc_quant = 0.0f;
-
+volatile int mesure = 0;
 
 void samples_cov(){
     const volatile uint16_t *samples = adc_buffer;
@@ -59,28 +58,33 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         return;
     }
     samples_cov();
-    electrical_angle = encoder_read_electrical_angle();
+
+    if (mesure==0)
+    {
+       return;
+    }
+    
+
+    
+
+    electrical_angle =
+    encoder_read_electrical_angle() - electrical_angle_bias;
+    if (electrical_angle < 0.0f) {
+        electrical_angle += 2.0f * static_cast<float>(PI);
+    }
+
 
     clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
-    park(&I_alpha,&I_beta,&electrical_angle,&I_q,&I_d);
-    
-   
-  
+    park(&I_alpha,&I_beta,&electrical_angle,&I_d,&I_q);
+    float temp = -electrical_angle;
+    float U_alpha,U_beta;
+    I_q = 1;
+    I_d = 0;
+    park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
 
-
-    const float s = I_q*2;
-    const float c = I_d*2;
-
-
-
-   
-
-    mc_foc(s,
-        c,
+    mc_foc(U_alpha,
+        U_beta,
         kMaxModulation);
-
-
-
 
 }
 
@@ -142,13 +146,24 @@ void setup(void){
         __HAL_TIM_MOE_DISABLE_UNCONDITIONALLY(&htim1);
         Error_Handler();
     }
+    
+    //校准电角度，给D轴电流。
+    if (mesure==0)
+    {
+        mc_foc(1,0,
+        kMaxModulation);
+        HAL_Delay(500);
+        electrical_angle_bias = encoder_read_electrical_angle();
+        mc_foc(0,
+        0,
+        kMaxModulation);
+        mesure =1;
+    }
+    
 
-   
 
     while (1)
     {
-        
-
         HAL_Delay(1);
     }
     

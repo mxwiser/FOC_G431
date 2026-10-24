@@ -218,4 +218,11 @@ targets:
         otherCmds: ""
         proType: 1
         speed: 8000
-    uploader: JLink
+      pyOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        config: .eide/foc_g431.pyocd.yaml
+        otherCmds: ""
+        speed: 4M
+        targetName: cortex_m
+    uploader: pyOCD
