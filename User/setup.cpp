@@ -3,12 +3,17 @@
 #include "main.h"
 #include "stdio.h"
 
+float angle_bias;
 
-
+float zero_electrical_angle(){
+   float bias;
+   return bias;
+}
 
 
 void setup(void){
     encoder_init();
+    angle_bias = zero_electrical_angle();
     while (1)
     {
         const float angleDeg = encoder_read_electrical_angle()
