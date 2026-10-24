@@ -9,6 +9,7 @@
 /bin
 /obj
 /out
+/FOC_G431
 
 # eide template
 *.ept
