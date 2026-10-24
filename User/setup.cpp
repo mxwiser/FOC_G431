@@ -11,7 +11,7 @@
 #include <stdio.h>
 
 namespace {
-const float kMaxModulation = 0.95f;
+const float kMaxModulation = 1.0f;
 float electrical_angle = 0.0f;
 float electrical_angle_bias = 0.0f;
 }

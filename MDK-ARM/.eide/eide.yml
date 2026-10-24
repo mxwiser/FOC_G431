@@ -224,5 +224,5 @@ targets:
         config: .eide/foc_g431.pyocd.yaml
         otherCmds: ""
         speed: 4M
-        targetName: cortex_m
+        targetName: stm32g431cbux
     uploader: pyOCD

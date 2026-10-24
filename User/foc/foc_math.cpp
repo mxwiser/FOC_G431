@@ -18,5 +18,36 @@ void foc_loop(){
 
 }
 void calculate_PID(PID *pid){
+    if (pid == 0) {
+        return;
+    }
+    const float limit = pid->output_limit;
+    if (!(pid->dt > 0.0f) || !(limit > 0.0f)) {
+        pid->integral = 0.0f;
+        pid->output = 0.0f;
+        pid->last_input = 0.0f;
+        return;
+    }
 
+    // Re-clamp saved state if the voltage/output limit has been reduced.
+    if (pid->integral > limit) pid->integral = limit;
+    if (pid->integral < -limit) pid->integral = -limit;
+
+    const float proportional = pid->kp * pid->input;
+    float candidate = pid->integral + pid->ki * pid->input * pid->dt;
+    if (candidate > limit) candidate = limit;
+    if (candidate < -limit) candidate = -limit;
+
+    // Do not accumulate an error that would push further into saturation.
+    // Opposite-sign error can still unwind the integral immediately.
+    const float requested = proportional + candidate;
+    if (!((requested > limit && pid->input > 0.0f) ||
+          (requested < -limit && pid->input < 0.0f))) {
+        pid->integral = candidate;
+    }
+
+    pid->output = proportional + pid->integral;
+    if (pid->output > limit) pid->output = limit;
+    if (pid->output < -limit) pid->output = -limit;
+    pid->last_input = pid->input;
 }

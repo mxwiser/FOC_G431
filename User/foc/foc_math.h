@@ -9,13 +9,14 @@
 
 typedef struct 
 {
-    float input;
-    float last_input;
-    float integral;
+    float input;         // Error: reference - feedback.
+    float last_input;    // Error from the previous call.
+    float integral;      // Accumulated integral contribution to output.
     float kp;
-    float ki;
+    float ki;            // Integral gain per second; calculate_PID multiplies by dt.
     float output;
-    float dt;
+    float dt;            // Sample period in seconds, e.g. 0.00004f at 25 kHz.
+    float output_limit;  // Required symmetric limit (+/-); <= 0 disables output.
 }PID;
 
 
@@ -37,6 +38,10 @@ typedef struct
 extern "C" {
 #endif
 
+/* Positional PI controller (no derivative term). Zero-initialize before use.
+ * Set input, kp, ki, dt and output_limit; read output after each call.
+ * Reset integral and last_input to zero when restarting the controller.
+ */
 void calculate_PID(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
