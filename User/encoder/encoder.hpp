@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-/* Call after MX_TIM4_Init(). */
+/* Call after MX_TIM4_Init(). TIM4 is free-running; Z pulses do not reset it. */
 void encoder_init(void);
 int16_t encoder_read_count(void);
 /* Mechanical angle in radians, normalized to [0, 2*pi). */

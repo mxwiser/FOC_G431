@@ -43,7 +43,7 @@ float encoder_read_electrical_angle(void)
 
 extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    if (GPIO_Pin == ENCODE_ZERO_Pin) {
-        __HAL_TIM_SET_COUNTER(&htim4, 0);
-    }
+    // Z must not change the counter reference used by electrical_angle_bias.
+    // The HAL EXTI handler already acknowledges the interrupt pending flag.
+    (void)GPIO_Pin;
 }

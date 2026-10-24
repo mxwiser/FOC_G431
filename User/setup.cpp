@@ -78,7 +78,7 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     park(&I_alpha,&I_beta,&electrical_angle,&I_d,&I_q);
     float temp = -electrical_angle;
     float U_alpha,U_beta;
-    I_q = 0.4;
+    I_q = 1;
     I_d = 0;
     park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
 
@@ -150,9 +150,9 @@ void setup(void){
     //校准电角度，给D轴电流。
     if (mesure==0)
     {
-        mc_foc(1,0,
+        mc_foc(0.5,0,
         kMaxModulation);
-        HAL_Delay(500);
+        HAL_Delay(200);
         electrical_angle_bias = encoder_read_electrical_angle();
         mc_foc(0,
         0,
