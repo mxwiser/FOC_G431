@@ -19,6 +19,16 @@ int16_t encoder_read_count(void)
     return static_cast<int16_t>(__HAL_TIM_GET_COUNTER(&htim4));
 }
 
+float encoder_read_mechanical_angle(void)
+{
+    int32_t mechanicalCount = encoder_read_count() % kCountsPerRevolution;
+    if (mechanicalCount < 0) {
+        mechanicalCount += kCountsPerRevolution;
+    }
+    return static_cast<float>(mechanicalCount)
+        * (2.0f * kPi / static_cast<float>(kCountsPerRevolution));
+}
+
 float encoder_read_electrical_angle(void)
 {
     const int32_t count = encoder_read_count();

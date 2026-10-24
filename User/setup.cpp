@@ -16,9 +16,9 @@ void setup(void){
     angle_bias = zero_electrical_angle();
     while (1)
     {
-        const float angleDeg = encoder_read_electrical_angle()
+        const float angleDeg = encoder_read_mechanical_angle()
             * (180.0f / 3.14159265358979323846f);
-        printf("angle:%.2f deg\r\n", angleDeg);
+        printf("mechanical:%.2f deg\r\n", angleDeg);
         HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_6);
         HAL_Delay(100);
     }
