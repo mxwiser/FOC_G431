@@ -78,7 +78,7 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     park(&I_alpha,&I_beta,&electrical_angle,&I_d,&I_q);
     float temp = -electrical_angle;
     float U_alpha,U_beta;
-    I_q = 1;
+    I_q = 0.4;
     I_d = 0;
     park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
 
