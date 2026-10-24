@@ -12,7 +12,7 @@
 
 namespace {
 const float kPhaseVoltagePeak = 5.0f; // Phase-to-neutral fundamental peak, volts.
-const float kMaxModulation = 0.8f;
+const float kMaxModulation = 0.7f;
 float electrical_angle = 0.0f;
 
 }
@@ -62,12 +62,23 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     electrical_angle = encoder_read_electrical_angle();
 
     clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
-    park(&I_beta,&I_alpha,&electrical_angle,&I_q,&I_d);
-
-
+    park(&I_alpha,&I_beta,&electrical_angle,&I_q,&I_d);
+    
+   
   
-    mc_foc(0,
-           0, kMaxModulation);
+
+
+    const float s = I_q*2;
+    const float c = I_d*2;
+
+
+
+   
+
+    mc_foc(s,
+        c,
+        kMaxModulation);
+
 
 
 
