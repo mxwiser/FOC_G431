@@ -9,6 +9,13 @@ virtualFolder:
   name: <virtual_root>
   files: []
   folders:
+    - name: FOC
+      files:
+        - path: ../User/foc/foc_math.cpp
+        - path: ../User/foc/svpwm.cpp
+        - path: ../User/setup.cpp
+        - path: ../User/encoder/encoder.cpp
+      folders: []
     - name: Application
       files: []
       folders:
@@ -24,6 +31,7 @@ virtualFolder:
                 - path: ../Core/Src/main.c
                 - path: ../Core/Src/gpio.c
                 - path: ../Core/Src/adc.c
+                - path: ../Core/Src/dma.c
                 - path: ../Core/Src/opamp.c
                 - path: ../Core/Src/tim.c
                 - path: ../Core/Src/usart.c
@@ -87,9 +95,7 @@ targets:
         - .cmsis/include
         - RTE/_FOC_G431
       libList: []
-    excludeList:
-      - ../FOC/foc_math.cpp
-      - ../FOC/svpwm.cpp
+    excludeList: []
     settings:
       debugger: cortex-debug
     toolchain: AC5
@@ -101,7 +107,8 @@ targets:
         options:
           version: 4
           afterBuildTasks: []
-          asm-compiler: {}
+          asm-compiler:
+            defines: []
           beforeBuildTasks: []
           c/cpp-compiler:
             CXX_FLAGS: --diag_suppress=1 --diag_suppress=1295
@@ -112,11 +119,14 @@ targets:
             warnings: all-warnings
           global:
             output-debug-info: enable
-            use-microLIB: true
+            use-microLIB: false
           linker:
             $outputTaskExcludes:
               - .bin
             output-format: elf
+            ro-base: ""
+            rw-base: ""
+            xo-base: ""
         scatterFilePath: ""
         storageLayout:
           RAM:
