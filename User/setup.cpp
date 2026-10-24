@@ -4,6 +4,7 @@
 #include "adc.h"
 #include "opamp.h"
 #include "tim.h"
+#include "usart.h"
 #include "foc/svpwm.h"
 #include <math.h>
 #include <stdio.h>
@@ -11,9 +12,34 @@
 namespace {
 const float kTwoPi = 6.28318530717958647692f;
 const float kPhaseVoltagePeak = 3.0f; // Phase-to-neutral fundamental peak, volts.
-const float kElectricalFrequency = 50.0f;
+const float kElectricalFrequency = 20.0f;
 const float kMaxModulation = 0.8f;
 const float kMinimumBusVoltage = 8.0f;
+const uint32_t kZeroSamples = 1024u;
+const uint32_t kTelemetryHz = 200u;
+
+struct TelemetryFrame {
+    uint32_t frame;
+    float ia;
+    float ib;
+    float ic;
+    float udc;
+    uint8_t running;
+};
+
+volatile TelemetryFrame telemetry_latest = {};
+volatile uint32_t telemetry_sequence = 0;
+uint32_t telemetry_decimation = 125u;
+float control_sample_hz = 25000.0f;
+
+uint32_t zero_sum_a = 0;
+uint32_t zero_sum_b = 0;
+uint32_t zero_sum_c = 0;
+uint32_t zero_count = 0;
+float zero_a = 0.0f;
+float zero_b = 0.0f;
+float zero_c = 0.0f;
+volatile bool current_zero_ready = false;
 
 float electrical_angle = 0.0f;
 float angle_step = 0.0f;
@@ -23,20 +49,39 @@ volatile uint32_t sample_frames = 0;
 }
 
 __align(4) static uint16_t adc_buffer[4];
-static volatile uint16_t adc_a = 0;
-static volatile uint16_t adc_b = 0;
-static volatile uint16_t adc_c = 0;
+static volatile float I_a = 0;
+static volatile float I_b = 0;
+static volatile float I_c = 0;
 volatile float Udc_quant = 0.0f;
 
 
 void samples_cov(){
     const volatile uint16_t *samples = adc_buffer;
-    adc_a = samples[0];
-    adc_b = samples[1];
-    Udc_quant =static_cast<float>(samples[2])
-                * (3.3f / 4095.0f)
-                * (187.0f / 18.0f); // PB10 low / Q48 off divider.
-    adc_c = samples[3];
+    const float amps_per_count = 0.02946541f;
+    const uint16_t raw_a = samples[0];
+    const uint16_t raw_b = samples[1];
+    const uint16_t raw_udc = samples[2];
+    const uint16_t raw_c = samples[3];
+    Udc_quant = static_cast<float>(raw_udc)
+        * (3.3f / 4095.0f) * (187.0f / 18.0f);
+
+    // TIM1 CH4 samples with all six bridge outputs disabled during this stage.
+    if (!current_zero_ready) {
+        zero_sum_a += raw_a;
+        zero_sum_b += raw_b;
+        zero_sum_c += raw_c;
+        if (++zero_count == kZeroSamples) {
+            zero_a = static_cast<float>(zero_sum_a) / kZeroSamples;
+            zero_b = static_cast<float>(zero_sum_b) / kZeroSamples;
+            zero_c = static_cast<float>(zero_sum_c) / kZeroSamples;
+            current_zero_ready = true;
+        }
+    }
+    if (current_zero_ready) {
+        I_a = (zero_a - raw_a) * amps_per_count;
+        I_b = (zero_b - raw_b) * amps_per_count;
+        I_c = (zero_c - raw_c) * amps_per_count;
+    }
 }
 
 
@@ -60,6 +105,17 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     }
     samples_cov();
     ++sample_frames;
+
+    // Publish a decimated snapshot; formatting and UART transmission stay outside ISR.
+    if (current_zero_ready && sample_frames % telemetry_decimation == 0u) {
+        telemetry_latest.frame = sample_frames;
+        telemetry_latest.ia = I_a;
+        telemetry_latest.ib = I_b;
+        telemetry_latest.ic = I_c;
+        telemetry_latest.udc = Udc_quant;
+        telemetry_latest.running = output_active ? 1u : 0u;
+        ++telemetry_sequence;
+    }
 
     // Keep CCR1/2/3 at zero while the bootstrap capacitors charge.
     if (!pwm_ready) {
@@ -107,6 +163,11 @@ void setup(void){
     }
     const float sample_hz = static_cast<float>(timer_clock)
         / (2.0f * (htim1.Init.Prescaler + 1u) * period);
+    control_sample_hz = sample_hz;
+    telemetry_decimation = static_cast<uint32_t>(sample_hz / kTelemetryHz + 0.5f);
+    if (telemetry_decimation == 0u) {
+        telemetry_decimation = 1u;
+    }
     angle_step = kTwoPi * kElectricalFrequency / sample_hz;
     // ① 启动三路运放。
     // MX_OPAMPx_Init只是配置，并没有让运放开始工作。
@@ -148,6 +209,15 @@ void setup(void){
         Error_Handler();
     }
 
+    // Measure zero offsets before enabling any of the six bridge outputs.
+    const uint32_t zero_start = HAL_GetTick();
+    while (!current_zero_ready) {
+        if (HAL_GetTick() - zero_start > 200u) {
+            Error_Handler();
+        }
+        HAL_Delay(1);
+    }
+
     // PWM1 CCR=0 keeps high sides off and complementary low sides on.
     if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK ||
         HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1) != HAL_OK ||
@@ -162,16 +232,60 @@ void setup(void){
     pwm_ready = true;
 
 
+    static char uart_line[96];
+    uint32_t last_sequence = 0;
+    uint32_t last_metadata_ms = HAL_GetTick() - 1000u;
+    uint32_t last_led_ms = HAL_GetTick();
     while (1)
     {
-        const float angleDeg = encoder_read_mechanical_angle()
-            * (180.0f / 3.14159265358979323846f);
-        printf("Udc:%.2f V mechanical:%.2f deg SVPWM:3Vpk/50Hz run:%u frames:%lu\r\n",
-               static_cast<double>(Udc_quant), static_cast<double>(angleDeg),
-               static_cast<unsigned>(output_active),
-               static_cast<unsigned long>(sample_frames));
-        HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_6);
-        HAL_Delay(100);
+        const uint32_t now = HAL_GetTick();
+        if (huart2.gState == HAL_UART_STATE_READY) {
+            int length = 0;
+            const bool metadata_due = now - last_metadata_ms >= 1000u;
+            uint32_t sequence = last_sequence;
+            if (metadata_due) {
+                length = snprintf(uart_line, sizeof(uart_line),
+                    "#FOC,1,%.0f,%.0f,%.1f,%.1f\r\n",
+                    static_cast<double>(control_sample_hz),
+                    static_cast<double>(control_sample_hz / telemetry_decimation),
+                    static_cast<double>(kElectricalFrequency),
+                    static_cast<double>(kPhaseVoltagePeak));
+            } else if (telemetry_sequence != last_sequence) {
+                TelemetryFrame snapshot;
+                const uint32_t irq_state = __get_PRIMASK();
+                __disable_irq();
+                snapshot.frame = telemetry_latest.frame;
+                snapshot.ia = telemetry_latest.ia;
+                snapshot.ib = telemetry_latest.ib;
+                snapshot.ic = telemetry_latest.ic;
+                snapshot.udc = telemetry_latest.udc;
+                snapshot.running = telemetry_latest.running;
+                sequence = telemetry_sequence;
+                __set_PRIMASK(irq_state);
+                length = snprintf(uart_line, sizeof(uart_line),
+                    "I,%lu,%.3f,%.3f,%.3f,%.2f,%u\r\n",
+                    static_cast<unsigned long>(snapshot.frame),
+                    static_cast<double>(snapshot.ia),
+                    static_cast<double>(snapshot.ib),
+                    static_cast<double>(snapshot.ic),
+                    static_cast<double>(snapshot.udc),
+                    static_cast<unsigned>(snapshot.running));
+            }
+            if (length > 0 && static_cast<unsigned>(length) < sizeof(uart_line)
+                && HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(uart_line),
+                    static_cast<uint16_t>(length)) == HAL_OK) {
+                if (metadata_due) {
+                    last_metadata_ms = now;
+                } else {
+                    last_sequence = sequence;
+                }
+            }
+        }
+        if (now - last_led_ms >= 100u) {
+            HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
+            last_led_ms = now;
+        }
+        HAL_Delay(1);
     }
     
 }
