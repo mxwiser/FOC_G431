@@ -9,10 +9,29 @@ extern  OPAMP_HandleTypeDef hopamp3;
 extern  ADC_HandleTypeDef hadc1;
 extern  ADC_HandleTypeDef hadc2;
 extern  TIM_HandleTypeDef htim1;
-__align(4) static uint16_t adc_buffer[4];
+__align(4) static uint32_t adc_buffer[2];
 static volatile uint16_t adc_a = 0;
 static volatile uint16_t adc_b = 0;
 static volatile uint16_t adc_c = 0;
+
+
+
+extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance != ADC1) {
+        return;
+    }
+
+    const volatile uint16_t *samples = adc_buffer;
+
+    adc_a = samples[0];
+    adc_b = samples[1];
+    adc_c = samples[3];
+}
+
+
+
+
 
 void setup(void){
     encoder_init();
@@ -39,7 +58,7 @@ void setup(void){
         2
     );
     __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT);
-    
+
     // 最后启动CH4，开始产生TRGO2采样触发。
     if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
         Error_Handler();
