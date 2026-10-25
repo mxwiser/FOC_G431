@@ -20,7 +20,7 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
         park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
         float temp = -theta;
         float U_alpha,U_beta;
-        I_q = 0.1;
+        I_q = 1;
         I_d = 0;
         park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
         uint32_t sector;
