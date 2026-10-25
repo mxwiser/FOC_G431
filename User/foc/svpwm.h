@@ -17,6 +17,7 @@ extern "C" {
 
 void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
 		uint32_t* tAout, uint32_t* tBout, uint32_t* tCout, uint32_t *svm_sector);
+void svpwm_fast(float alpha, float beta, float *tAout, float *tBout, float *tCout);
 #ifdef __cplusplus
 }
 #endif

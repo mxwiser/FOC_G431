@@ -1,6 +1,6 @@
 #include "svpwm.h"
-
-
+#include <math.h>
+#include <stdio.h>
 
 static inline void utils_truncate_number_int(int *number, int min, int max) {
 	if (*number > max) {
@@ -160,4 +160,41 @@ void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
 	*tBout = tB;
 	*tCout = tC;
 	*svm_sector = sector;
+}
+
+
+void svpwm_fast(float alpha, float beta, float *tAout, float *tBout, float *tCout)
+{
+    float a,b,c,al,be,max,min,v0;
+    float ta,tb,tc;
+    al = alpha * 1.33333333f;
+    be = beta * 1.15470053838f;
+
+    a = al;
+    b = -(al / 2.0f) + be;
+    c = -(al / 2.0f) - be;
+
+    // ARMCC5's default C++ math headers do not expose C99 fmaxf/fminf.
+    max = (a > b) ? a : b;
+    if (c > max) { max = c; }
+    min = (a < b) ? a : b;
+    if (c < min) { min = c; }
+
+	
+    v0 = 0.5f - (max + min) * 0.5f;
+    a = a + v0;
+    b = b + v0;            
+    c = c + v0;
+
+    if (a>1.0f){a=1.0f;}else if (a<-1.0f){a=-1.0f;}
+    if (b>1.0f){b=1.0f;}else if (b<-1.0f){b=-1.0f;}
+    if (c>1.0f){c=1.0f;}else if (c<-1.0f){c=-1.0f;}
+
+    ta = a * 0.5f + 0.5f;
+    tb = b * 0.5f + 0.5f;
+    tc = c * 0.5f + 0.5f;
+    
+    *tAout = ta;
+    *tBout = tb;
+    *tCout = tc;        
 }

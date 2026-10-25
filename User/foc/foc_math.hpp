@@ -54,17 +54,24 @@ class Foc_motor{
         float I_d;      //current of axis-d
         float I_q;      //current of axis-q
         float E_theta;  //angle of elecronic.
+        float U_dc;     //Master Voltage.
 
+        float target_I_d;
+        float target_I_q;
 
+        //[0,1] normalized
+        float U_d;         
+        float U_q;
 
     public:
-        
-        
-        
 
         void init();
-        void updateCurrent(float I_a,float I_b,float I_c);
-        
+        void updateCurrent(float &I_a,float &I_b,float &I_c){
+            this->I_a = I_a; this->I_b = I_b; this->I_c = I_c;
+        };
+        void updateUdc(float &udc){
+            this->U_dc = udc;
+        };
         void updateSvpwm(uint32_t &tA,uint32_t &tB,uint32_t &tC);
 };
 
