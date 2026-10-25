@@ -6,7 +6,7 @@ void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta){
     *beta = std::sin(static_cast<float>(2*PI / 3))*( *Ib - *Ic);
 }
 void park(float *x1,float *y1,float *theta,float *x2,float *y2){
-    *x2= *x1 * std::cos(*theta) + *y1*std::sin(*theta);
+    *x2= *x1 *std::cos(*theta) + *y1*std::sin(*theta);
     *y2= -*x1*std::sin(*theta) +  *y1 * std::cos(*theta);
 }
 
@@ -20,12 +20,11 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
         park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
         float temp = -theta;
         float U_alpha,U_beta;
-        I_q = 0.01;
+        I_q = 0.1;
         I_d = 0;
         park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
         uint32_t sector;
         foc_svm_normalized(U_alpha,U_beta,tAout,tBout,tCout,sector);
-        
 }
 
 void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, uint32_t &tC,uint32_t &sector){
