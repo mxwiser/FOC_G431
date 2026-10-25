@@ -9,8 +9,10 @@ void park(float *x1,float *y1,float *theta,float *x2,float *y2){
     *y2= -*x1*std::sin(*theta) +  *y1 * std::cos(*theta);
 }
 
-
-
+void Samples_Callback(float Ia, float Ib, float Ic, uint32_t &tAout, uint32_t &tBout, uint32_t &tCout)
+{
+    
+}
 
 void calculate_PID(PID *pid){
     if (pid == 0) {
