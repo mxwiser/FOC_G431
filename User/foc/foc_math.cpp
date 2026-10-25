@@ -72,3 +72,10 @@ void Foc_motor::init()
 {
 
 }
+void Foc_motor::updateCurrent(float I_a, float I_b, float I_c)
+{
+}
+
+void Foc_motor::updateSvpwm(uint32_t &tA, uint32_t &tB, uint32_t &tC)
+{
+}

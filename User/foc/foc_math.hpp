@@ -33,7 +33,7 @@ void calculate_PI(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
 void calculate_foc(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
-void calculate_Idq(float I_a, float I_b, float I_c,float &Id,float &Iq);
+void calculate_Idq(float I_a, float I_b, float I_c,float,float &Id,float &Iq);
 /* Input magnitude must be <= 1; 1 means the full linear SVPWM voltage range.
  * Smaller magnitudes retain their amplitude (do not normalize them to unit length).
  */
@@ -45,11 +45,27 @@ void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, 
 
 class Foc_motor{
     private:
-        float I_a;
-        float I_b;
-        float I_c;
+
+        float I_a;      //current of phase A.
+        float I_b;      //current of phase B.
+        float I_c;      //current of phase C.
+        float I_alpha;  //current of Alpha.
+        float I_beta;   //current of Beta.
+        float I_d;      //current of axis-d
+        float I_q;      //current of axis-q
+        float E_theta;  //angle of elecronic.
+
+
+
     public:
+        
+        
+        
+
         void init();
+        void updateCurrent(float I_a,float I_b,float I_c);
+        
+        void updateSvpwm(uint32_t &tA,uint32_t &tB,uint32_t &tC);
 };
 
 
