@@ -50,7 +50,7 @@ void mc_foc(float mod_alpha, float mod_beta, float max_mod)
 }
 
 float I_alpha,I_beta;
-float I_q,I_d;
+float I_q,I_d,I_q_pre;
 //中断内执行foc算法。实时性。
 extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
@@ -78,12 +78,12 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     park(&I_alpha,&I_beta,&electrical_angle,&I_d,&I_q);
     float temp = -electrical_angle;
     float U_alpha,U_beta;
-    I_q = 1;
+    I_q = I_q_pre;
     I_d = 0;
     park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
 
-    mc_foc(U_alpha,
-        U_beta,
+    mc_foc(U_alpha*1.5f*ONE_BY_SQRT3,
+        U_beta*1.5f*ONE_BY_SQRT3,
         kMaxModulation);
 
 }
@@ -157,6 +157,7 @@ void setup(void){
         mc_foc(0,
         0,
         kMaxModulation);
+        I_q_pre = 0.05;
         mesure =1;
     }
     
@@ -164,7 +165,8 @@ void setup(void){
 
     while (1)
     {
-        HAL_Delay(1);
+        HAL_Delay(3000);
+        I_q_pre = -I_q_pre;
     }
     
 }
