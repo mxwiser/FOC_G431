@@ -49,6 +49,7 @@ class Foc_motor{
         float I_b;
         float I_c;
     public:
+        void init();
 };
 
 

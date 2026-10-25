@@ -67,3 +67,8 @@ void calculate_PI(PID *pid){
     if (pid->output < -limit) pid->output = -limit;
     pid->last_input = pid->input;
 }
+
+void Foc_motor::init()
+{
+    
+}
