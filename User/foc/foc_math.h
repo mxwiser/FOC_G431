@@ -45,7 +45,9 @@ void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, 
 
 class Foc_motor{
     private:
-        
+        float I_a;
+        float I_b;
+        float I_c;
     public:
 };
 

@@ -23,6 +23,11 @@ static  float I_c = 0;
 volatile float Udc_quant = 0.0f;
 volatile int mesure = 0;
 
+Foc_motor foc_motor;
+
+
+
+
 void samples_cov(){
     const volatile uint16_t *samples = adc_buffer;
     const float amps_per_count = 0.02946541f;
