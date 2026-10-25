@@ -22,7 +22,7 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
     calculate_Idq(I_a,I_b,I_c,theta,I_q,I_d);
     float temp = -theta;
     float U_alpha,U_beta;
-    I_q = 0;
+    I_q = 1;
     I_d = 0;
     park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
     uint32_t sector;
@@ -30,7 +30,10 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
 }
 
 void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, uint32_t &tC,uint32_t &sector){
-    foc_svm(U_alpha*1.5f*ONE_BY_SQRT3, U_beta*1.5f*ONE_BY_SQRT3, 1,FOC_PWM_PERIOD_TICKS,&tA, &tB, &tC, &sector);
+    const float alpha = U_alpha * 1.5f * ONE_BY_SQRT3;
+    const float beta = U_beta * 1.5f * ONE_BY_SQRT3;
+    svpwm_fast(alpha, beta, 1.0f, FOC_PWM_PERIOD_TICKS,
+               &tA, &tB, &tC);
 }
 
 void calculate_PI(PID *pid){

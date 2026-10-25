@@ -72,7 +72,6 @@ void Error_Handler(void);
 #define LED_GPIO_Port GPIOC
 #define ENCODE_ZERO_Pin GPIO_PIN_8
 #define ENCODE_ZERO_GPIO_Port GPIOB
-#define ENCODE_ZERO_EXTI_IRQn EXTI9_5_IRQn
 
 /* USER CODE BEGIN Private defines */
 

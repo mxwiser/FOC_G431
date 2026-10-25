@@ -23,8 +23,7 @@ static inline void utils_truncate_number_int(int *number, int min, int max) {
  * @param tBout PWM duty cycle phase B
  * @param tCout PWM duty cycle phase C
  */
-void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
-				uint32_t* tAout, uint32_t* tBout, uint32_t* tCout, uint32_t *svm_sector) {
+static inline uint32_t svm_sector_for(float alpha, float beta) {
 	uint32_t sector;
 
 	if (beta >= 0.0f) {
@@ -60,6 +59,13 @@ void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
 			}
 		}
 	}
+
+	return sector;
+}
+
+void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
+				uint32_t* tAout, uint32_t* tBout, uint32_t* tCout, uint32_t *svm_sector) {
+	const uint32_t sector = svm_sector_for(alpha, beta);
 
 	// PWM timings
 	int tA, tB, tC;
@@ -163,10 +169,10 @@ void foc_svm(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
 }
 
 
-void svpwm_fast(float alpha, float beta, float *tAout, float *tBout, float *tCout)
+void svpwm_fast(float alpha, float beta, float max_mod, uint32_t PWMFullDutyCycle,
+        uint32_t* tAout, uint32_t* tBout, uint32_t* tCout)
 {
     float a,b,c,al,be,max,min,v0;
-    float ta,tb,tc;
     al = alpha * 1.33333333f;
     be = beta * 1.15470053838f;
 
@@ -180,21 +186,23 @@ void svpwm_fast(float alpha, float beta, float *tAout, float *tBout, float *tCou
     min = (a < b) ? a : b;
     if (c < min) { min = c; }
 
-	
-    v0 = 0.5f - (max + min) * 0.5f;
+    // Center in [-1, 1]; the duty conversion below adds 0.5 exactly once.
+    v0 = -(max + min) * 0.5f;
     a = a + v0;
-    b = b + v0;            
+    b = b + v0;
     c = c + v0;
 
-    if (a>1.0f){a=1.0f;}else if (a<-1.0f){a=-1.0f;}
-    if (b>1.0f){b=1.0f;}else if (b<-1.0f){b=-1.0f;}
-    if (c>1.0f){c=1.0f;}else if (c<-1.0f){c=-1.0f;}
+    // Match foc_svm's tick units and upper limit, including overmodulation.
+    int ta = static_cast<int>((a * 0.5f + 0.5f) * PWMFullDutyCycle);
+    int tb = static_cast<int>((b * 0.5f + 0.5f) * PWMFullDutyCycle);
+    int tc = static_cast<int>((c * 0.5f + 0.5f) * PWMFullDutyCycle);
+    const int t_max = PWMFullDutyCycle * (1.0f - (1.0f - max_mod) * 0.5f);
+    utils_truncate_number_int(&ta, 0, t_max);
+    utils_truncate_number_int(&tb, 0, t_max);
+    utils_truncate_number_int(&tc, 0, t_max);
 
-    ta = a * 0.5f + 0.5f;
-    tb = b * 0.5f + 0.5f;
-    tc = c * 0.5f + 0.5f;
-    
     *tAout = ta;
     *tBout = tb;
-    *tCout = tc;        
+    *tCout = tc;
+    
 }
