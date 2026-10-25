@@ -49,6 +49,16 @@ void mc_foc(float mod_alpha, float mod_beta, float max_mod)
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, tC);
 }
 
+
+float fix_electrical_angle(){
+    
+    float temp = encoder_read_electrical_angle() - electrical_angle_bias;
+    if (temp < 0.0f) {
+        temp += 2.0f * static_cast<float>(PI);
+    }
+    return temp;
+}
+
 float I_alpha,I_beta;
 float I_q,I_d,I_q_pre;
 //中断内执行foc算法。实时性。
@@ -63,16 +73,8 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     {
        return;
     }
-    
 
-    
-
-    electrical_angle =
-    encoder_read_electrical_angle() - electrical_angle_bias;
-    if (electrical_angle < 0.0f) {
-        electrical_angle += 2.0f * static_cast<float>(PI);
-    }
-
+    electrical_angle = fix_electrical_angle();
     uint32_t tA, tB, tC;
     calculate_foc(I_a,I_b,I_c,electrical_angle,tA,tB,tC);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, tA);
