@@ -73,16 +73,12 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         electrical_angle += 2.0f * static_cast<float>(PI);
     }
 
-
-    clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
-    park(&I_alpha,&I_beta,&electrical_angle,&I_d,&I_q);
-    float temp = -electrical_angle;
-    float U_alpha,U_beta;
-    I_q = I_q_pre;
-    I_d = 0;
-    park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
-
-    mc_foc(U_alpha*1.5f*ONE_BY_SQRT3,U_beta*1.5f*ONE_BY_SQRT3,kMaxModulation);
+    uint32_t tA, tB, tC;
+    Samples_Callback(I_a,I_b,I_c,electrical_angle,tA,tB,tC);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, tA);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, tB);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, tC);
+    
 
 }
 
