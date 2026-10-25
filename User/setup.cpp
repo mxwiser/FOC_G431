@@ -82,9 +82,7 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     I_d = 0;
     park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
 
-    mc_foc(U_alpha*1.5f*ONE_BY_SQRT3,
-        U_beta*1.5f*ONE_BY_SQRT3,
-        kMaxModulation);
+    mc_foc(U_alpha*1.5f*ONE_BY_SQRT3,U_beta*1.5f*ONE_BY_SQRT3,kMaxModulation);
 
 }
 
