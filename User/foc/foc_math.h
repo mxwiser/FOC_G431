@@ -33,7 +33,7 @@ extern "C" {
  * Set input, kp, ki, dt and output_limit; read output after each call.
  * Reset integral and last_input to zero when restarting the controller.
  */
-void calculate_PID(PID *pid);
+void calculate_PI(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
 void calculate_foc(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
