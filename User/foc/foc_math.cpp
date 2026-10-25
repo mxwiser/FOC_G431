@@ -10,26 +10,27 @@ void park(float *x1,float *y1,float *theta,float *x2,float *y2){
     *y2= -*x1*std::sin(*theta) +  *y1 * std::cos(*theta);
 }
 
-void calculate_Idq(float I_a, float I_b, float I_c,float &Id,float &Iq){
-     
+void calculate_Idq(float I_a, float I_b, float I_c,float theta,float &Id,float &Iq){
+    float I_alpha,I_beta,I_d,I_q;
+    clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
+    park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
 }
 
 void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout, uint32_t &tBout, uint32_t &tCout)
-{       float I_alpha,I_beta,I_d,I_q;
-        clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
-        park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
-        float temp = -theta;
-        float U_alpha,U_beta;
-        I_q = 1;
-        I_d = 0;
-        park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
-        uint32_t sector;
-        foc_svm_normalized(U_alpha,U_beta,tAout,tBout,tCout,sector);
+{       
+    float I_q,I_d;
+    calculate_Idq(I_a,I_b,I_c,theta,I_q,I_d);
+    float temp = -theta;
+    float U_alpha,U_beta;
+    I_q = 0;
+    I_d = 0;
+    park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
+    uint32_t sector;
+    foc_svm_normalized(U_alpha,U_beta,tAout,tBout,tCout,sector);
 }
 
 void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, uint32_t &tC,uint32_t &sector){
     foc_svm(U_alpha*1.5f*ONE_BY_SQRT3, U_beta*1.5f*ONE_BY_SQRT3, 1,FOC_PWM_PERIOD_TICKS,&tA, &tB, &tC, &sector);
-
 }
 
 void calculate_PI(PID *pid){
