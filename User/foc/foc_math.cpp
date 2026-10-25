@@ -29,7 +29,7 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
 }
 
 void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, uint32_t &tC,uint32_t &sector){
-    foc_svm(U_alpha*1.5f*ONE_BY_SQRT3, U_beta*1.5f*ONE_BY_SQRT3, 1,3400,&tA, &tB, &tC, &sector);
+    foc_svm(U_alpha*1.5f*ONE_BY_SQRT3, U_beta*1.5f*ONE_BY_SQRT3, 1,FOC_PWM_PERIOD_TICKS,&tA, &tB, &tC, &sector);
 }
 
 void calculate_PID(PID *pid){
