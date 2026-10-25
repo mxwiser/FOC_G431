@@ -9,14 +9,9 @@ void park(float *x1,float *y1,float *theta,float *x2,float *y2){
     *y2= -*x1*std::sin(*theta) +  *y1 * std::cos(*theta);
 }
 
-motor_state_t motor;
-void foc_init(){
-   motor = motor_state_t();
-}
 
-void foc_loop(){
 
-}
+
 void calculate_PID(PID *pid){
     if (pid == 0) {
         return;

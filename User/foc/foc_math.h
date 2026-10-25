@@ -45,8 +45,8 @@ extern "C" {
 void calculate_PID(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
-void foc_loop(void);
-void foc_init(void);
+
+
 
 #ifdef __cplusplus
 }
