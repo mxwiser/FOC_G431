@@ -35,7 +35,7 @@ extern "C" {
 void calculate_PID(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
-void Samples_Callback(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
+void calculate_foc(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
 
 
 

@@ -10,7 +10,7 @@ void park(float *x1,float *y1,float *theta,float *x2,float *y2){
     *y2= -*x1*std::sin(*theta) +  *y1 * std::cos(*theta);
 }
 
-void Samples_Callback(float I_a, float I_b, float I_c,float theta, uint32_t &tAout, uint32_t &tBout, uint32_t &tCout)
+void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout, uint32_t &tBout, uint32_t &tCout)
 {       float I_alpha,I_beta,I_d,I_q;
         clark(&I_a,&I_b,&I_c,&I_alpha,&I_beta);
         park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
