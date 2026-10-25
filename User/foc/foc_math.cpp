@@ -20,7 +20,7 @@ void calculate_foc(float I_a, float I_b, float I_c,float theta, uint32_t &tAout,
         park(&I_alpha,&I_beta,&theta,&I_d,&I_q);
         float temp = -theta;
         float U_alpha,U_beta;
-        I_q = 0.1;
+        I_q = 0.01;
         I_d = 0;
         park(&I_d,&I_q,&temp,&U_alpha,&U_beta);
         uint32_t sector;
@@ -33,33 +33,37 @@ void foc_svm_normalized(float U_alpha,float U_beta, uint32_t &tA, uint32_t &tB, 
 
 }
 
-float calculate_PI(float error, float kp, float ki, float dt,
-                   float output_limit, float &integral){
-    const float limit = output_limit;
-    if (!(dt > 0.0f) || !(limit > 0.0f)) {
-        integral = 0.0f;
-        return 0.0f;
+void calculate_PI(PID *pid){
+    if (pid == 0) {
+        return;
+    }
+    const float limit = pid->output_limit;
+    if (!(pid->dt > 0.0f) || !(limit > 0.0f)) {
+        pid->integral = 0.0f;
+        pid->last_input = 0.0f;
+        pid->output = 0.0f;
+        return;
     }
 
     // Re-clamp saved state if the voltage/output limit has been reduced.
-    if (integral > limit) integral = limit;
-    if (integral < -limit) integral = -limit;
+    if (pid->integral > limit) pid->integral = limit;
+    if (pid->integral < -limit) pid->integral = -limit;
 
-    const float proportional = kp * error;
-    float candidate = integral + ki * error * dt;
+    const float proportional = pid->kp * pid->input;
+    float candidate = pid->integral + pid->ki * pid->input * pid->dt;
     if (candidate > limit) candidate = limit;
     if (candidate < -limit) candidate = -limit;
 
     // Do not accumulate an error that would push further into saturation.
     // Opposite-sign error can still unwind the integral immediately.
     const float requested = proportional + candidate;
-    if (!((requested > limit && error > 0.0f) ||
-          (requested < -limit && error < 0.0f))) {
-        integral = candidate;
+    if (!((requested > limit && pid->input > 0.0f) ||
+          (requested < -limit && pid->input < 0.0f))) {
+        pid->integral = candidate;
     }
 
-    float output = proportional + integral;
-    if (output > limit) output = limit;
-    if (output < -limit) output = -limit;
-    return output;
+    pid->output = proportional + pid->integral;
+    if (pid->output > limit) pid->output = limit;
+    if (pid->output < -limit) pid->output = -limit;
+    pid->last_input = pid->input;
 }

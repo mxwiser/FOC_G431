@@ -8,18 +8,28 @@
 #define RESISTANCE (21.2f)
 #define INDUCTANCE (0.0053f)
 
+typedef struct
+{
+    float input;         // Error: reference - feedback.
+    float last_input;    // Error from the previous call.
+    float integral;      // Persistent integral contribution to output.
+    float kp;
+    float ki;            // Integral gain per second; integration includes dt.
+    float output;
+    float dt;            // Sample period, seconds.
+    float output_limit;  // Symmetric output limit (+/-); <= 0 disables output.
+} PID;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Positional PI with output limiting and anti-windup; returns the output.
- * error = reference - feedback. dt is seconds; ki is an integral gain per second.
- * output_limit is the symmetric limit (+/-), in the same units as the output.
- * integral is persistent state: initialize/reset to 0; use one variable per axis.
- * Nonpositive dt or output_limit clears integral and returns 0.
+/* Positional PI with output limiting and anti-windup.
+ * Zero-initialize once; set input, kp, ki, dt and output_limit, then read output.
+ * Use a separate PID instance per axis; reset integral when restarting.
+ * Nonpositive dt or output_limit clears integral, last_input and output.
  */
-float calculate_PI(float error, float kp, float ki, float dt,
-                   float output_limit, float &integral);
+void calculate_PI(PID *pid);
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
 void calculate_foc(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
