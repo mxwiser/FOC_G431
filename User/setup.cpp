@@ -6,7 +6,7 @@
 #include "tim.h"
 #include "usart.h"
 #include "foc/svpwm.h"
-#include "foc/foc_math.h"
+#include "foc/foc_math.hpp"
 #include <math.h>
 #include <stdio.h>
 

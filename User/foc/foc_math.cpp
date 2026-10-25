@@ -1,4 +1,4 @@
-#include "foc_math.h"
+#include "foc_math.hpp"
 #include <cmath>
 #include "svpwm.h"
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta){
@@ -70,5 +70,5 @@ void calculate_PI(PID *pid){
 
 void Foc_motor::init()
 {
-    
+
 }
