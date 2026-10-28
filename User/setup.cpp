@@ -82,9 +82,9 @@ extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     electrical_angle = fix_electrical_angle();
     uint32_t tA, tB, tC;
     calculate_foc(I_a,I_b,I_c,electrical_angle,tA,tB,tC);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, tA);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, tB);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, tC);
+    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, tA);
+    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, tB);
+    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, tC);
     
 
 }
