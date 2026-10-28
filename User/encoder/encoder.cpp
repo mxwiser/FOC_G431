@@ -1,8 +1,9 @@
 #include "encoder.hpp"
 #include "tim.h"
+#include "../foc/sensorless_config.hpp"
 
 namespace {
-const int kPolePairs = 7;
+const int kPolePairs = FOC_POLE_PAIRS;
 const int kCountsPerRevolution = 2048;
 const float kPi = 3.14159265358979323846f;
 }

@@ -1,6 +1,9 @@
 #include "svpwm.h"
 #include <math.h>
 #include <stdio.h>
+#if defined(__CC_ARM)
+#pragma Otime
+#endif
 
 static inline void utils_truncate_number_int(int *number, int min, int max) {
 	if (*number > max) {
