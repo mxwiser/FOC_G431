@@ -7,6 +7,7 @@
 #include "foc/foc_math.hpp"
 #include "foc/svpwm.h"
 #include "foc/vesc_observer.hpp"
+#include "serial_command.hpp"
 #include <cmath>
 #include <stdio.h>
 #if defined(__CC_ARM)
@@ -19,7 +20,7 @@ const float kPi = 3.14159265358979323846f;
 const float kAmpsPerCount = 0.02946541f;
 const uint32_t kZeroSamples = 2048u;
 enum MotorState { ZERO, IDLE, BOOTSTRAP, DETECT_R, DETECT_L,
-    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND, RUN, FAULT };
+    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND, RUN, FAULT, RETRY_WAIT };
 enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
     BAD_BUS, BAD_CONFIG, ALIGN_FAILED, STARTUP_TIMEOUT,
     LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR };
@@ -47,12 +48,31 @@ float motor_resistance = cfg::resistance;
 float motor_inductance = cfg::inductance;
 float motor_flux = cfg::flux_linkage;
 bool parameters_ready = false, detecting = false, bridge_started = false;
+volatile bool run_requested = false;
+bool current_mode = false;
+float iq_setpoint = cfg::current, iq_reference = 0.0f;
+uint32_t retry_attempts = 0;
+MotorFault restart_reason = NO_FAULT;
+enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
+CommandResult command_result = COMMAND_NONE;
+uint8_t uart_rx_byte;
+volatile uint8_t uart_rx_data[64];
+volatile uint8_t uart_rx_write = 0, uart_rx_read = 0;
+volatile bool uart_rx_overflow = false, uart_rx_error = false;
+SerialCommandParser command_parser = {};
 uint32_t coast_until = 0;
 float prior_alpha, prior_beta, older_alpha, older_beta;
 float applied_alpha, applied_beta, last_I_alpha, last_I_beta;
 PID pi_d = {}, pi_q = {}, pi_speed = {};
 VescObserverConfig observer_config = {};
 VescObserverState observer = {};
+struct IqTraceSample {
+    uint32_t frame;
+    float id, iq, reference, phase, speed, flux, va, vb, ia, ib,
+        filtered_va, filtered_vb, filtered_ia, filtered_ib, ud, uq;
+};
+IqTraceSample iq_trace[256];
+uint32_t iq_trace_index = 0;
 
 // Parameter identification: fixed accumulators, no allocation in the ISR.
 unsigned detect_stage = 0;
@@ -77,10 +97,12 @@ void bridge_off()
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0u);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0u);
     prior_alpha = prior_beta = older_alpha = older_beta = 0.0f;
+    iq_reference = 0.0f;
 }
 
 void motor_fail(MotorFault fault)
 {
+    run_requested = false;
     bridge_off();
     if (motor_fault == NO_FAULT) motor_fault = fault;
     motor_state = FAULT;
@@ -93,8 +115,19 @@ void enter_state(MotorState state)
     state_samples = 0;
     if (state == ALIGN) { align_d = I_alpha; align_q = I_beta; }
     if (state == BLEND) {
+        pi_d.kp = pi_q.kp = motor_inductance * cfg::run_current_bandwidth;
+        pi_d.ki = pi_q.ki = motor_resistance * cfg::run_current_bandwidth;
         blend_offset = vesc_observer_wrap(openloop_angle
             - observer_phase - observer.speed * sample_dt * 0.5f);
+        if (current_mode) {
+            // Preserve the torque already produced during open-loop tracking.
+            // Starting from zero can drop below the sensorless minimum speed.
+            float sn, cs;
+            foc_fast_sincos(blend_offset, sn, cs);
+            const float torque = cfg::direction * (I_d * sn + I_q * cs);
+            iq_reference = cfg::direction * (torque < 0.0f ? 0.0f :
+                (torque > iq_setpoint ? iq_setpoint : torque));
+        }
     }
     if (state == RUN) {
         const float torque_current = cfg::direction * I_q;
@@ -106,6 +139,15 @@ void enter_state(MotorState state)
     filtered_emf_a = filtered_emf_b = 0.0f;
     detect_phase = 0.0f;
     detect_samples = 0;
+}
+
+void retry_motor(MotorFault reason)
+{
+    if (detecting || !run_requested) { motor_fail(reason); return; }
+    bridge_off();
+    restart_reason = reason;
+    coast_until = HAL_GetTick() + cfg::retry_delay_ms;
+    enter_state(RETRY_WAIT);
 }
 
 bool limits_valid()
@@ -189,6 +231,7 @@ void current_control(float angle, float target_d, float target_q)
     const uint32_t start_cycles = DWT->CYCCNT;
 #endif
     electrical_angle = angle;
+    iq_reference = target_q;
     float sn, cs;
     foc_fast_sincos(angle, sn, cs);
     I_d = I_alpha * cs + I_beta * sn;
@@ -213,15 +256,25 @@ void current_control(float angle, float target_d, float target_q)
         U_d += -speed * motor_inductance * I_q - speed * motor_flux * difference_sin;
         U_q += speed * motor_inductance * I_d + speed * motor_flux * difference_cos;
     }
-    const float magnitude = foc_sqrt(U_d * U_d + U_q * U_q);
-    if (magnitude > maximum) {
-        const float scale = maximum / magnitude;
-        // Coupled dq vector limit: back-calculate both integral states.
-        pi_d.integral += U_d * (scale - 1.0f);
-        pi_q.integral += U_q * (scale - 1.0f);
-        U_d *= scale; U_q *= scale;
-    }
+    // Preserve d-axis regulation as back EMF consumes the voltage budget.
+    // Uniform vector scaling also weakens Ud, allowing uncontrolled Id.
+    const float limited_d = clamp(U_d, maximum);
+    const float q_budget_sq = maximum * maximum - limited_d * limited_d;
+    const float limited_q = clamp(U_q, foc_sqrt(q_budget_sq > 0.0f ? q_budget_sq : 0.0f));
+    pi_d.integral += limited_d - U_d;
+    pi_q.integral += limited_q - U_q;
+    U_d = limited_d; U_q = limited_q;
     output_voltage(U_d * cs - U_q * sn, U_d * sn + U_q * cs, true);
+    if ((motor_state == BLEND || motor_state == RUN) && sample_frames % 6u == 0u) {
+        IqTraceSample &row = iq_trace[iq_trace_index++ & 255u];
+        row.frame = sample_frames; row.id = I_d; row.iq = I_q;
+        row.reference = target_q; row.phase = angle; row.speed = observer.speed;
+        row.flux = observer.flux_magnitude; row.va = applied_alpha; row.vb = applied_beta;
+        row.ia = I_alpha; row.ib = I_beta;
+        row.filtered_va = filtered_U_alpha; row.filtered_vb = filtered_U_beta;
+        row.filtered_ia = filtered_I_alpha; row.filtered_ib = filtered_I_beta;
+        row.ud = U_d; row.uq = U_q;
+    }
 #if defined(STM32G431xx)
     const uint32_t cycles = DWT->CYCCNT - start_cycles;
     if (cycles > current_max_cycles) current_max_cycles = cycles;
@@ -345,7 +398,10 @@ void control_sample()
             foc_abs(align_q) < cfg::current * 0.3f) stable_time += sample_dt;
         else stable_time = 0.0f;
         if (state_time >= cfg::align_seconds) {
-            if (stable_time < 0.15f) { motor_fail(ALIGN_FAILED); return; }
+            if (stable_time < 0.15f) {
+                if (state_time >= cfg::align_seconds + cfg::align_settle_grace) retry_motor(ALIGN_FAILED);
+                return;
+            }
             vesc_observer_reset(observer_config, observer, 0.0f);
             observer.x1 += motor_inductance * I_alpha; observer.x2 += motor_inductance * I_beta;
             observer_phase = 0.0f;
@@ -371,13 +427,13 @@ void control_sample()
             foc_abs(vesc_observer_wrap(observer_phase - openloop_angle)) < 0.7f) stable_time += sample_dt;
         else stable_time = 0.0f;
         if (stable_time >= cfg::lock_seconds) { enter_state(BLEND); return; }
-        if (state_time >= cfg::startup_timeout) motor_fail(STARTUP_TIMEOUT);
+        if (state_time >= cfg::startup_timeout) retry_motor(STARTUP_TIMEOUT);
         return;
     }
     const bool quality = observer.ready && cfg::direction * observer.speed > cfg::minimum_rad_s &&
-        foc_abs(observer.speed) < 3000.0f;
+        foc_abs(observer.speed) * sample_dt < 0.8f;
     if (quality) lost_time = 0.0f; else lost_time += sample_dt;
-    if (lost_time >= cfg::lost_seconds) { motor_fail(LOST_LOCK); return; }
+    if (lost_time >= cfg::lost_seconds) { retry_motor(LOST_LOCK); return; }
     // Current-sample observer phase, then sample-to-valley compensation.
     const float phase = vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f);
     if (motor_state == BLEND) {
@@ -385,29 +441,47 @@ void control_sample()
         // Follow observer speed immediately; fade only the initial angle offset.
         // Interpolating two independently moving angles can jump by 2*pi.
         const float angle = vesc_observer_wrap(phase + (1.0f - fraction) * blend_offset);
-        current_control(angle, cfg::current * (1.0f - fraction), cfg::direction * cfg::current * fraction);
+        float reference = cfg::direction * cfg::current * fraction;
+        if (current_mode) {
+            // Start the commanded torque ramp during handover. A fixed 1 A
+            // pulse here bypasses IQ= and can accelerate a light rotor before
+            // RUN has a chance to slew down to the user's requested current.
+            const float target = cfg::direction * iq_setpoint;
+            reference = iq_reference + clamp(target - iq_reference,
+                cfg::iq_slew_per_second * sample_dt);
+        }
+        current_control(angle, cfg::current * (1.0f - fraction), reference);
         if (fraction >= 1.0f) enter_state(RUN);
     } else if (motor_state == RUN) {
-        pi_speed.input = cfg::openloop_rad_s - cfg::direction * observer.speed;
-        calculate_PI(&pi_speed);
-        // Coast above the target; do not command reverse torque during trial runs.
-        if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
-        if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
-        current_control(phase, 0.0f, cfg::direction * pi_speed.output);
+        if (current_mode) {
+            const float target = cfg::direction * iq_setpoint;
+            const float reference = iq_reference + clamp(target - iq_reference,
+                cfg::iq_slew_per_second * sample_dt);
+            current_control(phase, 0.0f, reference);
+        } else {
+            pi_speed.input = cfg::openloop_rad_s - cfg::direction * observer.speed;
+            calculate_PI(&pi_speed);
+            // Coast above the target; do not command reverse torque during trial runs.
+            if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
+            if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
+            current_control(phase, 0.0f, cfg::direction * pi_speed.output);
+        }
     }
 }
 
-void start_motor(bool detect)
+bool start_motor(bool detect)
 {
-    if (motor_state != IDLE || !limits_valid() || (!detect && !parameters_ready)) return;
-    if (static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return;
-    if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return; }
+    if (motor_state != IDLE || !limits_valid() || (!detect && !parameters_ready)) return false;
+    if (!detect && current_mode && iq_setpoint <= 0.0f) return false;
+    if (static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return false;
+    if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return false; }
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     detecting = detect;
+    run_requested = !detect;
     if (detect) parameters_ready = false;
     bridge_off(); __HAL_TIM_SET_COUNTER(&htim1, 0u);
     if (HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE) != HAL_OK) {
-        motor_fail(PWM_ERROR); __set_PRIMASK(mask); return;
+        motor_fail(PWM_ERROR); __set_PRIMASK(mask); return false;
     }
     enter_state(BOOTSTRAP);
     if (!bridge_started) {
@@ -420,19 +494,81 @@ void start_motor(bool detect)
         else bridge_started = true;
     } else __HAL_TIM_MOE_ENABLE(&htim1);
     __set_PRIMASK(mask);
+    return motor_state == BOOTSTRAP;
 }
 
 void service_command(uint8_t command)
 {
     if (command == 's' || command == 'S') {
-        const uint32_t mask = __get_PRIMASK(); __disable_irq(); bridge_off();
+        const uint32_t mask = __get_PRIMASK(); __disable_irq();
+        run_requested = false;
+        restart_reason = NO_FAULT;
+        bridge_off();
         // Stop does not clear latched faults. Reset is required for that.
         if (motor_fault == NO_FAULT && motor_state != ZERO) {
             coast_until = HAL_GetTick() + 2000u; enter_state(IDLE);
         }
         __set_PRIMASK(mask);
-    } else if (command == 'd' || command == 'D') start_motor(true);
-    else if (command == 'r' || command == 'R') start_motor(false);
+        command_result = COMMAND_OK;
+    } else if (command == 'd' || command == 'D' || command == 'r' || command == 'R') {
+        if (start_motor(command == 'd' || command == 'D')) {
+            retry_attempts = 0;
+            restart_reason = NO_FAULT;
+            command_result = COMMAND_OK;
+        } else command_result = COMMAND_BUSY;
+    }
+}
+
+void service_restart()
+{
+    if (motor_state != RETRY_WAIT || !run_requested || motor_fault != NO_FAULT ||
+        static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return;
+    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    enter_state(IDLE);
+    if (start_motor(false)) ++retry_attempts;
+    __set_PRIMASK(mask);
+}
+
+void service_serial()
+{
+    if (uart_rx_overflow || uart_rx_error) {
+        const uint32_t mask = __get_PRIMASK(); __disable_irq();
+        const bool error = uart_rx_error;
+        uart_rx_read = uart_rx_write;
+        uart_rx_overflow = uart_rx_error = false;
+        command_parser.length = 0;
+        command_parser.discarding = true;
+        __set_PRIMASK(mask);
+        service_command('S');
+        command_result = COMMAND_RX;
+        if (error) {
+            HAL_UART_AbortReceive(&huart2);
+            if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
+        }
+    }
+    while (uart_rx_read != uart_rx_write) {
+        const uint8_t byte = uart_rx_data[uart_rx_read];
+        uart_rx_read = (uart_rx_read + 1u) & 63u;
+        SerialCommand command;
+        if (!serial_command_feed(command_parser, byte, command)) continue;
+        if (command.type == SERIAL_STOP) service_command('S');
+        else if (command.type == SERIAL_START) service_command('R');
+        else if (command.type == SERIAL_DETECT) service_command('D');
+        else if (command.type == SERIAL_SET_IQ) {
+            if (!foc_finite(command.value) || command.value < 0.0f || command.value > cfg::current) {
+                command_result = COMMAND_RANGE;
+            } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
+                command_result = COMMAND_BUSY;
+            } else {
+                const uint32_t mask = __get_PRIMASK(); __disable_irq();
+                iq_setpoint = command.value;
+                current_mode = true;
+                if (iq_setpoint == 0.0f) service_command('S');
+                __set_PRIMASK(mask);
+                command_result = COMMAND_OK;
+            }
+        } else command_result = COMMAND_FORMAT;
+    }
 }
 
 void send_status()
@@ -441,19 +577,28 @@ void send_status()
     static char text[320]; // Persistent until the interrupt-driven TX completes.
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
-    const float bus = Udc_quant, id = I_d, iq = I_q, speed = observer.speed;
+    const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
+    const float bus = Udc_quant, id = inactive ? 0.0f : I_d, iq = inactive ? 0.0f : I_q;
+    const float speed = inactive ? 0.0f : observer.speed;
     const float r = motor_resistance, l = motor_inductance, flux = motor_flux, ia = I_alpha;
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
-    const bool ready = parameters_ready, locked = observer.ready;
+    const bool ready = parameters_ready, locked = observer.ready && !inactive;
     const uint32_t frames = sample_frames;
+    const float target_iq = iq_setpoint, reference_iq = iq_reference;
+    const bool mode = current_mode, armed = run_requested;
+    const uint32_t retries = retry_attempts;
+    const MotorFault reason = restart_reason;
+    const CommandResult result = command_result;
     __set_PRIMASK(mask);
     const int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu\r\n",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d\r\n",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
-        static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles));
+        static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
+        mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
+        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result));
     if (length > 0 && length < static_cast<int>(sizeof(text)))
         HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length));
 }
@@ -484,7 +629,7 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     I_c = (zero_c - c) * kAmpsPerCount;
     last_I_alpha = I_alpha; last_I_beta = I_beta;
     clark(&I_a, &I_b, &I_c, &I_alpha, &I_beta);
-    if (motor_state == IDLE) return;
+    if (motor_state == IDLE || motor_state == RETRY_WAIT) return;
     if (a == 0 || a == 4095 || b == 0 || b == 4095 || c == 0 || c == 4095 ||
         foc_abs(I_a) > cfg::overcurrent || foc_abs(I_b) > cfg::overcurrent ||
         foc_abs(I_c) > cfg::overcurrent) { motor_fail(OVERCURRENT); return; }
@@ -505,10 +650,23 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
         filtered_U_beta += filter * (applied_beta - filtered_U_beta);
         filtered_I_alpha += filter * (I_alpha - filtered_I_alpha);
         filtered_I_beta += filter * (I_beta - filtered_I_beta);
+        // Matched filtering also attenuates the rotating PM flux. The Ortega
+        // radius must match that filtered flux, otherwise its one-sided
+        // correction leaves a DC flux offset as electrical speed increases.
+        // Use the discrete one-pole response, including its phase lag.
+        float filter_sn, filter_cs;
+        foc_fast_sincos(observer.speed * sample_dt, filter_sn, filter_cs);
+        const float retained = 1.0f - filter;
+        const float filter_real = 1.0f - retained * filter_cs;
+        const float filter_imag = retained * filter_sn;
+        observer_config.flux_linkage = motor_flux * filter /
+            foc_sqrt(filter_real * filter_real + filter_imag * filter_imag);
+        observer_config.gain = 500.0f /
+            (observer_config.flux_linkage * observer_config.flux_linkage);
         if (!vesc_observer_update(observer_config, observer, filtered_U_alpha, filtered_U_beta,
                                   filtered_I_alpha, filtered_I_beta, sample_dt, true)) motor_fail(NUMERIC_ERROR);
         observer_phase = vesc_observer_wrap(observer.angle +
-            foc_fast_atan2(observer.speed * kObserverFilterSeconds, 1.0f));
+            foc_fast_atan2(filter_imag, filter_real));
 #if defined(STM32G431xx)
         const uint32_t cycles = DWT->CYCCNT - start_cycles;
         if (cycles > observer_max_cycles) observer_max_cycles = cycles;
@@ -535,6 +693,20 @@ extern "C" void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
     if (hadc == &hadc1 || hadc == &hadc2) motor_fail(ADC_ERROR);
 }
 
+extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart != &huart2) return;
+    const uint8_t next = (uart_rx_write + 1u) & 63u;
+    if (next == uart_rx_read) uart_rx_overflow = true;
+    else { uart_rx_data[uart_rx_write] = uart_rx_byte; uart_rx_write = next; }
+    if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
+}
+
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart2) uart_rx_error = true;
+}
+
 void setup(void)
 {
 #if defined(STM32G431xx)
@@ -545,6 +717,7 @@ void setup(void)
     // No TIM4 reads or encoder startup. Ignore an unplugged Z input.
     CLEAR_BIT(EXTI->IMR1, ENCODE_ZERO_Pin); __HAL_GPIO_EXTI_CLEAR_IT(ENCODE_ZERO_Pin);
     bridge_off();
+    if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
     RCC_ClkInitTypeDef clocks = {}; uint32_t latency = 0;
     HAL_RCC_GetClockConfig(&clocks, &latency);
     const float timer_clock = static_cast<float>(HAL_RCC_GetPCLK2Freq())
@@ -571,11 +744,11 @@ void setup(void)
         CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
         DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 #endif
-        uint8_t command;
-        if (HAL_UART_Receive(&huart2, &command, 1, 0) == HAL_OK) service_command(command);
+        service_serial();
         const uint32_t now = HAL_GetTick(), frame = sample_frames;
         if (frame != last_frame) { last_frame = frame; last_adc = now; }
         if (now - last_adc > 10u && motor_state != FAULT) motor_fail(ADC_TIMEOUT);
+        service_restart();
         if (now - last_status >= 100u) { last_status = now; send_status(); }
         __WFI();
     }

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 // 20 magnetic poles / 18 slots. Slots do not enter the electrical angle ratio.
 #define FOC_POLE_PAIRS 10
@@ -42,8 +43,10 @@ const float min_bus = FOC_MIN_BUS;
 const float max_bus = FOC_MAX_BUS;
 const float direction = FOC_SENSORLESS_DIRECTION;
 const float max_modulation = 0.8f;          // Preserve low-side sampling time.
-const float current_bandwidth = 500.0f;     // rad/s; Kp = L*w, Ki = R*w.
+const float current_bandwidth = 500.0f;     // rad/s; alignment, open loop, detection.
+const float run_current_bandwidth = 5000.0f; // rad/s; closed-loop current tracking.
 const float align_seconds = 1.0f;
+const float align_settle_grace = 0.5f;      // Release during alignment may need settling.
 const float ramp_seconds = 3.0f;
 const float startup_timeout = 8.0f;
 const float openloop_rad_s = 150.0f;        // Electrical rad/s, about 143 mech rpm.
@@ -51,4 +54,6 @@ const float minimum_rad_s = 80.0f;
 const float lock_seconds = 0.2f;
 const float blend_seconds = 0.05f;
 const float lost_seconds = 0.1f;
+const uint32_t retry_delay_ms = 2000u;       // Bridge off between stall retries.
+const float iq_slew_per_second = 2.0f;      // A/s for live current-mode changes.
 }
