@@ -51,7 +51,7 @@ bool parameters_ready = false, detecting = false, bridge_started = false;
 volatile bool run_requested = false;
 bool current_mode = false;
 float iq_setpoint = cfg::current, iq_reference = 0.0f;
-float iq_voltage_limit = cfg::current;
+float iq_voltage_limit = cfg::max_iq;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
@@ -92,7 +92,7 @@ void bridge_off()
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0u);
     prior_alpha = prior_beta = older_alpha = older_beta = 0.0f;
     iq_reference = 0.0f;
-    iq_voltage_limit = cfg::current;
+    iq_voltage_limit = cfg::max_iq;
 }
 
 void motor_fail(MotorFault fault)
@@ -148,7 +148,9 @@ void retry_motor(MotorFault reason)
 bool limits_valid()
 {
     return foc_finite(cfg::current) && cfg::current >= 0.1f &&
+        foc_finite(cfg::max_iq) && cfg::max_iq > 0.0f &&
         foc_finite(cfg::overcurrent) && cfg::overcurrent > cfg::current * 1.5f &&
+        cfg::overcurrent > cfg::max_iq * 1.5f &&
         foc_finite(cfg::min_bus) && cfg::min_bus > 0.0f &&
         foc_finite(cfg::max_bus) && cfg::max_bus > cfg::min_bus &&
         (cfg::direction == 1.0f || cfg::direction == -1.0f);
@@ -444,8 +446,10 @@ void control_sample()
             const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
             float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
             if (fraction < 0.0f) fraction = 0.0f;
-            if (fraction > 1.0f) fraction = 1.0f;
-            iq_voltage_limit = cfg::current * fraction;
+            // Changing the command ceiling must not multiply the gain of
+            // the voltage-headroom limiter or couple it to startup current.
+            iq_voltage_limit = fraction * cfg::iq_voltage_derate_scale;
+            if (iq_voltage_limit > cfg::max_iq) iq_voltage_limit = cfg::max_iq;
             const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
             const float target = cfg::direction * allowed;
             float reference = iq_reference + clamp(target - iq_reference,
@@ -551,7 +555,7 @@ void service_serial()
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
         else if (command.type == SERIAL_SET_IQ) {
-            if (!foc_finite(command.value) || command.value < 0.0f || command.value > cfg::current) {
+            if (!foc_finite(command.value) || command.value < 0.0f || command.value > cfg::max_iq) {
                 command_result = COMMAND_RANGE;
             } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
                 command_result = COMMAND_BUSY;

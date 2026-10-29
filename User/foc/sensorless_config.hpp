@@ -17,17 +17,22 @@
 #ifndef FOC_MOTOR_FLUX
 #define FOC_MOTOR_FLUX 0.00182327f
 #endif
+// Startup, parameter detection, and the default speed-mode current limit (A).
 #ifndef FOC_TEST_CURRENT
 #define FOC_TEST_CURRENT 1.0f
 #endif
+// Independent upper bound for user IQ= commands (A).
+#ifndef FOC_MAX_IQ
+#define FOC_MAX_IQ 5.0f
+#endif
 #ifndef FOC_TRIP_CURRENT
-#define FOC_TRIP_CURRENT 3.0f
+#define FOC_TRIP_CURRENT 30.0f
 #endif
 #ifndef FOC_MIN_BUS
 #define FOC_MIN_BUS 8.0f
 #endif
 #ifndef FOC_MAX_BUS
-#define FOC_MAX_BUS 14.0f
+#define FOC_MAX_BUS 23.0f
 #endif
 #ifndef FOC_SENSORLESS_DIRECTION
 #define FOC_SENSORLESS_DIRECTION 1.0f
@@ -37,7 +42,8 @@ namespace sensorless_config {
 const float resistance = FOC_MOTOR_R;        // Ohms, phase resistance.
 const float inductance = FOC_MOTOR_L;        // H, phase inductance (Ld = Lq).
 const float flux_linkage = FOC_MOTOR_FLUX;   // Wb, phase PM flux linkage.
-const float current = FOC_TEST_CURRENT;     // A, positive dq test current.
+const float current = FOC_TEST_CURRENT;     // A, startup/detection and default speed-mode limit.
+const float max_iq = FOC_MAX_IQ;            // A, maximum user IQ= command; independent of startup.
 const float overcurrent = FOC_TRIP_CURRENT; // A, absolute phase-current trip.
 const float min_bus = FOC_MIN_BUS;
 const float max_bus = FOC_MAX_BUS;
@@ -48,6 +54,7 @@ const float run_current_bandwidth = 5000.0f; // rad/s; closed-loop current track
 // Reserve voltage for d-axis regulation before back EMF saturates the bridge.
 const float iq_voltage_derate_start = 0.75f;
 const float iq_voltage_derate_end = 0.85f;
+const float iq_voltage_derate_scale = 1.0f; // A per headroom interval; independent of IQ range.
 const float align_seconds = 1.0f;
 const float align_settle_grace = 0.5f;      // Release during alignment may need settling.
 const float ramp_seconds = 3.0f;
