@@ -51,6 +51,7 @@ bool parameters_ready = false, detecting = false, bridge_started = false;
 volatile bool run_requested = false;
 bool current_mode = false;
 float iq_setpoint = cfg::current, iq_reference = 0.0f;
+float iq_voltage_limit = cfg::current;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
@@ -66,13 +67,6 @@ float applied_alpha, applied_beta, last_I_alpha, last_I_beta;
 PID pi_d = {}, pi_q = {}, pi_speed = {};
 VescObserverConfig observer_config = {};
 VescObserverState observer = {};
-struct IqTraceSample {
-    uint32_t frame;
-    float id, iq, reference, phase, speed, flux, va, vb, ia, ib,
-        filtered_va, filtered_vb, filtered_ia, filtered_ib, ud, uq;
-};
-IqTraceSample iq_trace[256];
-uint32_t iq_trace_index = 0;
 
 // Parameter identification: fixed accumulators, no allocation in the ISR.
 unsigned detect_stage = 0;
@@ -98,6 +92,7 @@ void bridge_off()
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0u);
     prior_alpha = prior_beta = older_alpha = older_beta = 0.0f;
     iq_reference = 0.0f;
+    iq_voltage_limit = cfg::current;
 }
 
 void motor_fail(MotorFault fault)
@@ -265,16 +260,6 @@ void current_control(float angle, float target_d, float target_q)
     pi_q.integral += limited_q - U_q;
     U_d = limited_d; U_q = limited_q;
     output_voltage(U_d * cs - U_q * sn, U_d * sn + U_q * cs, true);
-    if ((motor_state == BLEND || motor_state == RUN) && sample_frames % 6u == 0u) {
-        IqTraceSample &row = iq_trace[iq_trace_index++ & 255u];
-        row.frame = sample_frames; row.id = I_d; row.iq = I_q;
-        row.reference = target_q; row.phase = angle; row.speed = observer.speed;
-        row.flux = observer.flux_magnitude; row.va = applied_alpha; row.vb = applied_beta;
-        row.ia = I_alpha; row.ib = I_beta;
-        row.filtered_va = filtered_U_alpha; row.filtered_vb = filtered_U_beta;
-        row.filtered_ia = filtered_I_alpha; row.filtered_ib = filtered_I_beta;
-        row.ud = U_d; row.uq = U_q;
-    }
 #if defined(STM32G431xx)
     const uint32_t cycles = DWT->CYCCNT - start_cycles;
     if (cycles > current_max_cycles) current_max_cycles = cycles;
@@ -454,9 +439,20 @@ void control_sample()
         if (fraction >= 1.0f) enter_state(RUN);
     } else if (motor_state == RUN) {
         if (current_mode) {
-            const float target = cfg::direction * iq_setpoint;
-            const float reference = iq_reference + clamp(target - iq_reference,
+            const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
+            const float emf = foc_abs(observer.speed) * motor_flux;
+            const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
+            float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
+            if (fraction < 0.0f) fraction = 0.0f;
+            if (fraction > 1.0f) fraction = 1.0f;
+            iq_voltage_limit = cfg::current * fraction;
+            const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
+            const float target = cfg::direction * allowed;
+            float reference = iq_reference + clamp(target - iq_reference,
                 cfg::iq_slew_per_second * sample_dt);
+            // Voltage headroom can disappear faster than a user-command ramp.
+            if (cfg::direction * reference > iq_voltage_limit)
+                reference = cfg::direction * iq_voltage_limit;
             current_control(phase, 0.0f, reference);
         } else {
             pi_speed.input = cfg::openloop_rad_s - cfg::direction * observer.speed;
@@ -585,20 +581,20 @@ void send_status()
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
     const bool ready = parameters_ready, locked = observer.ready && !inactive;
     const uint32_t frames = sample_frames;
-    const float target_iq = iq_setpoint, reference_iq = iq_reference;
+    const float target_iq = iq_setpoint, reference_iq = iq_reference, iq_cap = iq_voltage_limit;
     const bool mode = current_mode, armed = run_requested;
     const uint32_t retries = retry_attempts;
     const MotorFault reason = restart_reason;
     const CommandResult result = command_result;
     __set_PRIMASK(mask);
     const int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d\r\n",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f\r\n",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
         static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
         mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
-        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result));
+        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap);
     if (length > 0 && length < static_cast<int>(sizeof(text)))
         HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length));
 }

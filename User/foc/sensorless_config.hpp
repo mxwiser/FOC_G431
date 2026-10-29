@@ -45,6 +45,9 @@ const float direction = FOC_SENSORLESS_DIRECTION;
 const float max_modulation = 0.8f;          // Preserve low-side sampling time.
 const float current_bandwidth = 500.0f;     // rad/s; alignment, open loop, detection.
 const float run_current_bandwidth = 5000.0f; // rad/s; closed-loop current tracking.
+// Reserve voltage for d-axis regulation before back EMF saturates the bridge.
+const float iq_voltage_derate_start = 0.75f;
+const float iq_voltage_derate_end = 0.85f;
 const float align_seconds = 1.0f;
 const float align_settle_grace = 0.5f;      // Release during alignment may need settling.
 const float ramp_seconds = 3.0f;
