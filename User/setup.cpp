@@ -68,6 +68,23 @@ PID pi_d = {}, pi_q = {}, pi_speed = {};
 VescObserverConfig observer_config = {};
 VescObserverState observer = {};
 
+#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
+// Optional SWD capture; omitted entirely from normal firmware.
+struct CurrentDiagnosticSample {
+    uint32_t frame, state;
+    uint16_t raw_a, raw_b, raw_c, raw_bus;
+    float ia, ib, ic, id, iq, iqref, phase, observer_phase, speed, flux,
+        bus, va, vb, command_va, command_vb, integral_d, integral_q,
+        filtered_ia, filtered_ib, phase_error, raw_angle, pll_angle;
+    uint32_t ccr_a, ccr_b, ccr_c;
+};
+CurrentDiagnosticSample current_diag[192];
+volatile uint32_t diag_mode = 0, diag_count = 0, diag_frozen = 0;
+volatile uint32_t diag_state = RUN, diag_min_samples = 0, diag_stride = 1;
+volatile uint32_t diag_frame_deadline = 0;
+volatile float diag_min_speed = 0.0f, diag_trigger_current = 4.5f;
+#endif
+
 // Parameter identification: fixed accumulators, no allocation in the ISR.
 unsigned detect_stage = 0;
 float detect_voltage, detect_bias, sum_i, sum_v, low_i, low_v;
@@ -602,6 +619,51 @@ void send_status()
     if (length > 0 && length < static_cast<int>(sizeof(text)))
         HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length));
 }
+
+#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
+void record_current_diagnostic()
+{
+    const bool timeout = diag_frame_deadline &&
+        static_cast<int32_t>(sample_frames - diag_frame_deadline) >= 0;
+    if (diag_mode && !diag_frozen && motor_state == diag_state &&
+        state_samples >= diag_min_samples && foc_abs(observer.speed) >= diag_min_speed &&
+        diag_stride && sample_frames % diag_stride == 0) {
+        CurrentDiagnosticSample &r = current_diag[diag_count % 192u];
+        r.frame = sample_frames; r.state = motor_state;
+        r.raw_a = adc_buffer[0]; r.raw_b = adc_buffer[1];
+        r.raw_c = adc_buffer[3]; r.raw_bus = adc_buffer[2];
+        r.ia = I_a; r.ib = I_b; r.ic = I_c; r.id = I_d; r.iq = I_q;
+        r.iqref = iq_reference; r.phase = electrical_angle;
+        r.observer_phase = observer_phase; r.speed = observer.speed;
+        r.flux = observer.flux_magnitude; r.bus = Udc_quant;
+        r.va = applied_alpha; r.vb = applied_beta;
+        r.command_va = prior_alpha * Udc_quant; r.command_vb = prior_beta * Udc_quant;
+        r.integral_d = pi_d.integral; r.integral_q = pi_q.integral;
+        r.filtered_ia = filtered_I_alpha; r.filtered_ib = filtered_I_beta;
+        r.phase_error = observer.phase_error;
+        r.raw_angle = observer.angle; r.pll_angle = observer.pll_angle;
+        r.ccr_a = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
+        r.ccr_b = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_2);
+        r.ccr_c = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_3);
+        ++diag_count;
+        if ((diag_mode == 1u && diag_count >= 192u) ||
+            (diag_mode == 2u && (foc_abs(I_a) > diag_trigger_current ||
+             foc_abs(I_b) > diag_trigger_current || foc_abs(I_c) > diag_trigger_current))) {
+            diag_frozen = 1;
+            if (diag_mode == 2u) {
+                run_requested = false; bridge_off();
+                coast_until = HAL_GetTick() + 2000u; enter_state(IDLE);
+            }
+            diag_mode = 0;
+        }
+    }
+    if (timeout) {
+        diag_frame_deadline = 0; diag_mode = 0; diag_frozen = 1;
+        run_requested = false; bridge_off();
+        coast_until = HAL_GetTick() + 2000u; enter_state(IDLE);
+    }
+}
+#endif
 } // namespace
 
 static void adc_sample(ADC_HandleTypeDef *hadc)
@@ -629,7 +691,12 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     I_c = (zero_c - c) * kAmpsPerCount;
     last_I_alpha = I_alpha; last_I_beta = I_beta;
     clark(&I_a, &I_b, &I_c, &I_alpha, &I_beta);
-    if (motor_state == IDLE || motor_state == RETRY_WAIT) return;
+    if (motor_state == IDLE || motor_state == RETRY_WAIT) {
+#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
+        record_current_diagnostic();
+#endif
+        return;
+    }
     if (a == 0 || a == 4095 || b == 0 || b == 4095 || c == 0 || c == 4095 ||
         foc_abs(I_a) > cfg::overcurrent || foc_abs(I_b) > cfg::overcurrent ||
         foc_abs(I_c) > cfg::overcurrent) { motor_fail(OVERCURRENT); return; }
@@ -673,6 +740,9 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
 #endif
     }
     if (motor_state != FAULT) control_sample();
+#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
+    record_current_diagnostic();
+#endif
 }
 
 extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)

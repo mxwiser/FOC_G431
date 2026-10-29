@@ -37,6 +37,12 @@
 #ifndef FOC_SENSORLESS_DIRECTION
 #define FOC_SENSORLESS_DIRECTION 1.0f
 #endif
+#ifndef FOC_RUN_CURRENT_BANDWIDTH
+// 20 V / 17 uH motor: 5000 rad/s permits growing observer/current-loop
+// oscillation around electrical frequency. 9000 rad/s was cycle-captured
+// through ~4000 mechanical rpm; Ts*bandwidth = 0.72 at 12.5 kHz.
+#define FOC_RUN_CURRENT_BANDWIDTH 9000.0f
+#endif
 
 namespace sensorless_config {
 const float resistance = FOC_MOTOR_R;        // Ohms, phase resistance.
@@ -50,7 +56,7 @@ const float max_bus = FOC_MAX_BUS;
 const float direction = FOC_SENSORLESS_DIRECTION;
 const float max_modulation = 0.8f;          // Preserve low-side sampling time.
 const float current_bandwidth = 500.0f;     // rad/s; alignment, open loop, detection.
-const float run_current_bandwidth = 5000.0f; // rad/s; closed-loop current tracking.
+const float run_current_bandwidth = FOC_RUN_CURRENT_BANDWIDTH; // rad/s; closed-loop current tracking.
 // Reserve voltage for d-axis regulation before back EMF saturates the bridge.
 const float iq_voltage_derate_start = 0.75f;
 const float iq_voltage_derate_end = 0.85f;
