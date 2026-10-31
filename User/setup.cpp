@@ -52,6 +52,8 @@ volatile bool run_requested = false;
 bool current_mode = false;
 float iq_setpoint = cfg::current, iq_reference = 0.0f;
 float iq_voltage_limit = cfg::max_iq;
+float speed_setpoint = cfg::default_speed_rpm, speed_current_limit = cfg::current;
+float speed_reference = 0.0f, speed_feedback = 0.0f, speed_elapsed = 0.0f;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
@@ -110,6 +112,7 @@ void bridge_off()
     prior_alpha = prior_beta = older_alpha = older_beta = 0.0f;
     iq_reference = 0.0f;
     iq_voltage_limit = cfg::max_iq;
+    speed_reference = speed_elapsed = 0.0f;
 }
 
 void motor_fail(MotorFault fault)
@@ -131,17 +134,21 @@ void enter_state(MotorState state)
         pi_d.ki = pi_q.ki = motor_resistance * cfg::run_current_bandwidth;
         blend_offset = vesc_observer_wrap(openloop_angle
             - observer_phase - observer.speed * sample_dt * 0.5f);
-        if (current_mode) {
+        {
             // Preserve the torque already produced during open-loop tracking.
             // Starting from zero can drop below the sensorless minimum speed.
             float sn, cs;
             foc_fast_sincos(blend_offset, sn, cs);
             const float torque = cfg::direction * (I_d * sn + I_q * cs);
+            const float limit = current_mode ? iq_setpoint : speed_current_limit;
             iq_reference = cfg::direction * (torque < 0.0f ? 0.0f :
-                (torque > iq_setpoint ? iq_setpoint : torque));
+                (torque > limit ? limit : torque));
+            speed_reference = speed_feedback = cfg::direction * observer.speed;
+            speed_elapsed = 0.0f;
+            pi_speed.integral = pi_speed.output = cfg::direction * iq_reference;
         }
     }
-    if (state == RUN) {
+    if (state == RUN && current_mode) {
         const float torque_current = cfg::direction * I_q;
         pi_speed.integral = torque_current < 0.0f ? 0.0f :
             (torque_current > cfg::current ? cfg::current : torque_current);
@@ -186,9 +193,9 @@ void configure_controllers()
     pi_d = pi_q = cleared;
     pi_speed = cleared;
     pi_speed.dt = sample_dt;
-    pi_speed.kp = cfg::current * 0.1f / cfg::openloop_rad_s;
-    pi_speed.ki = pi_speed.kp * 5.0f;
-    pi_speed.output_limit = cfg::current;
+    pi_speed.kp = cfg::speed_kp;
+    pi_speed.ki = cfg::speed_ki;
+    pi_speed.output_limit = speed_current_limit;
     pi_d.dt = pi_q.dt = sample_dt;
     pi_d.kp = pi_q.kp = motor_inductance * cfg::current_bandwidth;
     pi_d.ki = pi_q.ki = motor_resistance * cfg::current_bandwidth;
@@ -203,6 +210,47 @@ void configure_controllers()
     vesc_observer_reset(observer_config, observer, 0.0f);
     observer_phase = 0.0f;
     filtered_U_alpha = filtered_U_beta = filtered_I_alpha = filtered_I_beta = 0.0f;
+    speed_reference = speed_feedback = speed_elapsed = 0.0f;
+}
+
+void update_iq_voltage_limit()
+{
+    const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
+    const float emf = foc_abs(observer.speed) * motor_flux;
+    const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
+    float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
+    if (fraction < 0.0f) fraction = 0.0f;
+    iq_voltage_limit = fraction * cfg::iq_voltage_derate_scale;
+    if (iq_voltage_limit > cfg::max_iq) iq_voltage_limit = cfg::max_iq;
+}
+
+float speed_control_reference()
+{
+    const float filter = sample_dt / (cfg::speed_filter_seconds + sample_dt);
+    speed_feedback += filter * (cfg::direction * observer.speed - speed_feedback);
+    speed_elapsed += sample_dt;
+    const float limit = speed_current_limit < iq_voltage_limit ? speed_current_limit : iq_voltage_limit;
+    if (speed_elapsed >= cfg::speed_loop_seconds) {
+        const float elapsed = speed_elapsed;
+        speed_elapsed = 0.0f;
+        const float rpm_to_electrical = 2.0f * kPi * FOC_POLE_PAIRS / 60.0f;
+        speed_reference += clamp(speed_setpoint * rpm_to_electrical - speed_reference,
+            cfg::speed_ramp_rpm_per_second * rpm_to_electrical * elapsed);
+        pi_speed.dt = elapsed;
+        pi_speed.output_limit = limit;
+        pi_speed.input = speed_reference - speed_feedback;
+        calculate_PI(&pi_speed);
+        // Forward torque only: deceleration coasts, avoiding regenerative bus rise.
+        if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
+        if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
+    }
+    // The current loop remains at the ADC rate. Clamp rapidly if headroom shrinks.
+    float reference = cfg::direction * iq_reference;
+    const float target = pi_speed.output < limit ? pi_speed.output : limit;
+    reference += clamp(target-reference,cfg::speed_iq_slew_per_second * sample_dt);
+    if (reference > limit) reference = limit;
+    if (reference < 0.0f) reference = 0.0f;
+    return cfg::direction * reference;
 }
 
 // SI volts -> VESC modulation -> timer ticks. Save quantized voltage / Udc.
@@ -440,12 +488,13 @@ void control_sample()
     if (lost_time >= cfg::lost_seconds) { retry_motor(LOST_LOCK); return; }
     // Current-sample observer phase, then sample-to-valley compensation.
     const float phase = vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f);
+    update_iq_voltage_limit();
     if (motor_state == BLEND) {
         const float fraction = state_time < cfg::blend_seconds ? state_time / cfg::blend_seconds : 1.0f;
         // Follow observer speed immediately; fade only the initial angle offset.
         // Interpolating two independently moving angles can jump by 2*pi.
         const float angle = vesc_observer_wrap(phase + (1.0f - fraction) * blend_offset);
-        float reference = cfg::direction * cfg::current * fraction;
+        float reference;
         if (current_mode) {
             // Start the commanded torque ramp during handover. A fixed 1 A
             // pulse here bypasses IQ= and can accelerate a light rotor before
@@ -453,20 +502,11 @@ void control_sample()
             const float target = cfg::direction * iq_setpoint;
             reference = iq_reference + clamp(target - iq_reference,
                 cfg::iq_slew_per_second * sample_dt);
-        }
+        } else reference = speed_control_reference();
         current_control(angle, cfg::current * (1.0f - fraction), reference);
         if (fraction >= 1.0f) enter_state(RUN);
     } else if (motor_state == RUN) {
         if (current_mode) {
-            const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
-            const float emf = foc_abs(observer.speed) * motor_flux;
-            const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
-            float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
-            if (fraction < 0.0f) fraction = 0.0f;
-            // Changing the command ceiling must not multiply the gain of
-            // the voltage-headroom limiter or couple it to startup current.
-            iq_voltage_limit = fraction * cfg::iq_voltage_derate_scale;
-            if (iq_voltage_limit > cfg::max_iq) iq_voltage_limit = cfg::max_iq;
             const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
             const float target = cfg::direction * allowed;
             float reference = iq_reference + clamp(target - iq_reference,
@@ -476,12 +516,7 @@ void control_sample()
                 reference = cfg::direction * iq_voltage_limit;
             current_control(phase, 0.0f, reference);
         } else {
-            pi_speed.input = cfg::openloop_rad_s - cfg::direction * observer.speed;
-            calculate_PI(&pi_speed);
-            // Coast above the target; do not command reverse torque during trial runs.
-            if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
-            if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
-            current_control(phase, 0.0f, cfg::direction * pi_speed.output);
+            current_control(phase, 0.0f, speed_control_reference());
         }
     }
 }
@@ -490,6 +525,7 @@ bool start_motor(bool detect)
 {
     if (motor_state != IDLE || !limits_valid() || (!detect && !parameters_ready)) return false;
     if (!detect && current_mode && iq_setpoint <= 0.0f) return false;
+    if (!detect && !current_mode && speed_setpoint <= 0.0f) return false;
     if (static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return false;
     if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return false; }
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
@@ -571,16 +607,34 @@ void service_serial()
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
-        else if (command.type == SERIAL_SET_IQ) {
-            if (!foc_finite(command.value) || command.value < 0.0f || command.value > cfg::max_iq) {
+        else if (command.type == SERIAL_SET_IQ || command.type == SERIAL_SET_SPEED ||
+                 command.type == SERIAL_SET_SPEED_LIMIT) {
+            const bool speed = command.type == SERIAL_SET_SPEED;
+            const bool limit = command.type == SERIAL_SET_SPEED_LIMIT;
+            const bool range_ok = speed ? (command.value == 0.0f ||
+                (command.value >= cfg::min_speed_rpm && command.value <= cfg::max_speed_rpm)) :
+                (command.value >= (limit ? 0.1f : 0.0f) && command.value <= cfg::max_iq);
+            if (!foc_finite(command.value) || !range_ok) {
                 command_result = COMMAND_RANGE;
             } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
                 command_result = COMMAND_BUSY;
             } else {
                 const uint32_t mask = __get_PRIMASK(); __disable_irq();
-                iq_setpoint = command.value;
-                current_mode = true;
-                if (iq_setpoint == 0.0f) service_command('S');
+                if (limit) speed_current_limit = command.value;
+                else if (speed) {
+                    speed_setpoint = command.value;
+                    if (current_mode) {
+                        speed_reference = speed_feedback = cfg::direction * observer.speed;
+                        speed_elapsed = 0.0f;
+                        pi_speed.integral = pi_speed.output = cfg::direction * iq_reference;
+                    }
+                    current_mode = false;
+                    if (speed_setpoint == 0.0f) service_command('S');
+                } else {
+                    iq_setpoint = command.value;
+                    current_mode = true;
+                    if (iq_setpoint == 0.0f) service_command('S');
+                }
                 __set_PRIMASK(mask);
                 command_result = COMMAND_OK;
             }
@@ -591,13 +645,16 @@ void service_serial()
 void send_status()
 {
     if (huart2.gState != HAL_UART_STATE_READY) return;
-    static char text[320]; // Persistent until the interrupt-driven TX completes.
+    static char text[448]; // Persistent until the interrupt-driven TX completes.
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
     const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
     const float bus = Udc_quant, id = inactive ? 0.0f : I_d, iq = inactive ? 0.0f : I_q;
     const float speed = inactive ? 0.0f : observer.speed;
     const float r = motor_resistance, l = motor_inductance, flux = motor_flux, ia = I_alpha;
+    // Same ADC frame, before Clarke/Park or observer filtering. Keep the
+    // legacy ia=Ialpha field for existing serial clients; i_a/i_b/i_c are phases.
+    const float phase_a = I_a, phase_b = I_b, phase_c = I_c;
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
     const bool ready = parameters_ready, locked = observer.ready && !inactive;
@@ -607,15 +664,20 @@ void send_status()
     const uint32_t retries = retry_attempts;
     const MotorFault reason = restart_reason;
     const CommandResult result = command_result;
+    const float target_rpm = cfg::direction * speed_setpoint;
+    const float reference_rpm = inactive || current_mode ? 0.0f :
+        cfg::direction * speed_reference * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS);
+    const float speed_limit = speed_current_limit;
     __set_PRIMASK(mask);
     const int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f\r\n",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,i_a=%.4f,i_b=%.4f,i_c=%.4f,vset=%.1f,vref=%.1f,ilim=%.3f\r\n",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
         static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
         mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
-        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap);
+        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap,
+        phase_a, phase_b, phase_c, target_rpm, reference_rpm, speed_limit);
     if (length > 0 && length < static_cast<int>(sizeof(text)))
         HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length));
 }

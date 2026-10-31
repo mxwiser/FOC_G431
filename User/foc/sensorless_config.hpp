@@ -32,7 +32,7 @@
 #define FOC_MIN_BUS 8.0f
 #endif
 #ifndef FOC_MAX_BUS
-#define FOC_MAX_BUS 23.0f
+#define FOC_MAX_BUS 24.0f
 #endif
 #ifndef FOC_SENSORLESS_DIRECTION
 #define FOC_SENSORLESS_DIRECTION 1.0f
@@ -72,4 +72,15 @@ const float blend_seconds = 0.05f;
 const float lost_seconds = 0.1f;
 const uint32_t retry_delay_ms = 2000u;       // Bridge off between stall retries.
 const float iq_slew_per_second = 2.0f;      // A/s for live current-mode changes.
+// Positive speed magnitude, in the configured direction. Zero requests stop.
+const float default_speed_rpm = 150.0f;
+const float min_speed_rpm = 150.0f;         // Keep above the 76 rpm observer floor.
+const float max_speed_rpm = 4000.0f;
+const float speed_ramp_rpm_per_second = 1000.0f;
+const float speed_loop_seconds = 0.001f;   // ~1 kHz; uses actual elapsed sample time.
+const float speed_filter_seconds = 0.01f;
+const float speed_iq_slew_per_second = 20.0f; // Load rejection; separate from manual IQ ramp.
+// PI input: electrical rad/s error; output: forward Iq in amperes.
+const float speed_kp = current * 0.3f / openloop_rad_s;
+const float speed_ki = speed_kp * 5.0f;
 }

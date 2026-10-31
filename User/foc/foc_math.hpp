@@ -5,7 +5,7 @@
 #include "sensorless_config.hpp"
 #define POLES FOC_POLE_PAIRS
 #define ENCODER_COUNT_MAX 2048
-#define FOC_PWM_PERIOD_TICKS 6800u
+#define FOC_PWM_PERIOD_TICKS 3400
 #define RESISTANCE (FOC_MOTOR_R)
 #define INDUCTANCE (FOC_MOTOR_L)
 
