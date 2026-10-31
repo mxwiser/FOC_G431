@@ -76,7 +76,12 @@ const float iq_slew_per_second = 2.0f;      // A/s for live current-mode changes
 const float default_speed_rpm = 150.0f;
 const float min_speed_rpm = 150.0f;         // Keep above the 76 rpm observer floor.
 const float max_speed_rpm = 4000.0f;
-const float speed_ramp_rpm_per_second = 1000.0f;
+const float speed_ramp_rpm_per_second = 500.0f;
+// Keep the proven low-speed slope; gradually approach VESC's default
+// 25000 ERPM/s (2500 mechanical rpm/s for this 10 pole-pair motor).
+const float speed_ramp_fast_rpm_per_second = 2500.0f;
+const float speed_ramp_fast_start_rpm = 500.0f;
+const float speed_ramp_fast_full_rpm = 1500.0f;
 const float speed_loop_seconds = 0.001f;   // ~1 kHz; uses actual elapsed sample time.
 const float speed_filter_seconds = 0.01f;
 const float speed_iq_slew_per_second = 20.0f; // Load rejection; separate from manual IQ ramp.

@@ -234,8 +234,17 @@ float speed_control_reference()
         const float elapsed = speed_elapsed;
         speed_elapsed = 0.0f;
         const float rpm_to_electrical = 2.0f * kPi * FOC_POLE_PAIRS / 60.0f;
+        // Use the slower end of the move, so a step to or from low speed
+        // cannot bypass the low-speed ramp limit.
+        const float reference_rpm = speed_reference / rpm_to_electrical;
+        const float ramp_speed_rpm = reference_rpm < speed_setpoint ? reference_rpm : speed_setpoint;
+        const float ramp_fraction = clamp((ramp_speed_rpm - cfg::speed_ramp_fast_start_rpm) /
+            (cfg::speed_ramp_fast_full_rpm - cfg::speed_ramp_fast_start_rpm), 1.0f);
+        const float ramp = cfg::speed_ramp_rpm_per_second +
+            (cfg::speed_ramp_fast_rpm_per_second - cfg::speed_ramp_rpm_per_second) *
+            (ramp_fraction > 0.0f ? ramp_fraction : 0.0f);
         speed_reference += clamp(speed_setpoint * rpm_to_electrical - speed_reference,
-            cfg::speed_ramp_rpm_per_second * rpm_to_electrical * elapsed);
+            ramp * rpm_to_electrical * elapsed);
         pi_speed.dt = elapsed;
         pi_speed.output_limit = limit;
         pi_speed.input = speed_reference - speed_feedback;
