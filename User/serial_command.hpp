@@ -3,7 +3,7 @@
 
 enum SerialCommandType {
     SERIAL_NONE, SERIAL_START, SERIAL_STOP, SERIAL_DETECT,
-    SERIAL_SET_IQ, SERIAL_SET_SPEED, SERIAL_SET_SPEED_LIMIT, SERIAL_INVALID
+    SERIAL_SET_IQ, SERIAL_SET_SPEED, SERIAL_SET_SPEED_LIMIT, SERIAL_SET_PHASES, SERIAL_INVALID
 };
 struct SerialCommand { SerialCommandType type; float value; };
 struct SerialCommandParser { char text[24]; uint8_t length; bool discarding; };
@@ -38,6 +38,11 @@ inline bool serial_command_feed(SerialCommandParser &parser, uint8_t byte,
             (parser.text[1]=='L' || parser.text[1]=='l') && (parser.text[2]=='I' || parser.text[2]=='i') &&
             (parser.text[3]=='M' || parser.text[3]=='m') && parser.text[4]=='=') {
             index = 5; type = SERIAL_SET_SPEED_LIMIT;
+        } else if (length >= 3 && (parser.text[0]=='P' || parser.text[0]=='p') &&
+            (parser.text[1]=='H' || parser.text[1]=='h') && parser.text[2]=='=') {
+            index = 3; type = SERIAL_SET_PHASES;
+            // Invalid phase values leave the current selection and motor ACK intact.
+            command.type = type; command.value = -1.0f;
         } else return true;
         while (index < length && (parser.text[index] == ' ' || parser.text[index] == '\t')) ++index;
         bool negative = false;

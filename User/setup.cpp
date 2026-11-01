@@ -63,6 +63,39 @@ volatile uint8_t uart_rx_data[64];
 volatile uint8_t uart_rx_write = 0, uart_rx_read = 0;
 volatile bool uart_rx_overflow = false, uart_rx_error = false;
 SerialCommandParser command_parser = {};
+// Telemetry selection only; ADC sampling remains active for FOC and protection.
+volatile uint8_t phase_telemetry_mask = 0u;
+// ADC is the sole producer; foreground is the sole consumer. The producer
+// never overwrites unread slots, including while DMA is transmitting.
+struct PhaseSample { uint32_t frame; int16_t a, b, c; };
+PhaseSample phase_samples[128];
+volatile uint8_t phase_write = 0u, phase_read = 0u;
+volatile uint32_t phase_dropped = 0u;
+const uint32_t kPhaseStride = 12u;
+
+int16_t phase_milliamps(float value)
+{
+    value *= 1000.0f;
+    if (value > 32767.0f) return 32767;
+    if (value < -32768.0f) return -32768;
+    return static_cast<int16_t>(value);
+}
+
+void capture_phase_sample()
+{
+    const uint8_t selected = phase_telemetry_mask;
+    if (!selected || sample_frames % kPhaseStride) return;
+    const uint8_t write = phase_write;
+    const uint8_t next = (write + 1u) & 127u;
+    if (next == phase_read) { ++phase_dropped; return; }
+    PhaseSample &sample = phase_samples[write];
+    sample.frame = sample_frames;
+    sample.a = (selected & 1u) ? phase_milliamps(I_a) : 0;
+    sample.b = (selected & 2u) ? phase_milliamps(I_b) : 0;
+    sample.c = (selected & 4u) ? phase_milliamps(I_c) : 0;
+    __DMB();
+    phase_write = next;
+}
 uint32_t coast_until = 0;
 float prior_alpha, prior_beta, older_alpha, older_beta;
 float applied_alpha, applied_beta, last_I_alpha, last_I_beta;
@@ -616,6 +649,17 @@ void service_serial()
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
+        else if (command.type == SERIAL_SET_PHASES) {
+            if (foc_finite(command.value) && command.value >= 0.0f && command.value <= 7.0f) {
+                const uint8_t phases = static_cast<uint8_t>(command.value);
+                if (command.value == static_cast<float>(phases) && phases != phase_telemetry_mask) {
+                    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+                    phase_read = phase_write; // discard samples from the previous selection
+                    phase_telemetry_mask = phases;
+                    __set_PRIMASK(mask);
+                }
+            }
+        }
         else if (command.type == SERIAL_SET_IQ || command.type == SERIAL_SET_SPEED ||
                  command.type == SERIAL_SET_SPEED_LIMIT) {
             const bool speed = command.type == SERIAL_SET_SPEED;
@@ -651,9 +695,9 @@ void service_serial()
     }
 }
 
-void send_status()
+bool send_status()
 {
-    if (huart2.gState != HAL_UART_STATE_READY) return;
+    if (huart2.gState != HAL_UART_STATE_READY) return false;
     static char text[448]; // Persistent until the interrupt-driven TX completes.
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
@@ -663,7 +707,10 @@ void send_status()
     const float r = motor_resistance, l = motor_inductance, flux = motor_flux, ia = I_alpha;
     // Same ADC frame, before Clarke/Park or observer filtering. Keep the
     // legacy ia=Ialpha field for existing serial clients; i_a/i_b/i_c are phases.
-    const float phase_a = I_a, phase_b = I_b, phase_c = I_c;
+    const uint8_t phases = phase_telemetry_mask;
+    const float phase_a = (phases & 1u) ? I_a : 0.0f;
+    const float phase_b = (phases & 2u) ? I_b : 0.0f;
+    const float phase_c = (phases & 4u) ? I_c : 0.0f;
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
     const bool ready = parameters_ready, locked = observer.ready && !inactive;
@@ -678,17 +725,71 @@ void send_status()
         cfg::direction * speed_reference * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS);
     const float speed_limit = speed_current_limit;
     __set_PRIMASK(mask);
-    const int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,i_a=%.4f,i_b=%.4f,i_c=%.4f,vset=%.1f,vref=%.1f,ilim=%.3f\r\n",
+    int length = snprintf(text, sizeof(text),
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
         static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
         mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
         static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap,
-        phase_a, phase_b, phase_c, target_rpm, reference_rpm, speed_limit);
-    if (length > 0 && length < static_cast<int>(sizeof(text)))
-        HAL_UART_Transmit_IT(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length));
+        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases));
+    if (length <= 0 || length >= static_cast<int>(sizeof(text))) return false;
+    const char *names[] = {",i_a=%.4f", ",i_b=%.4f", ",i_c=%.4f"};
+    const float values[] = {phase_a, phase_b, phase_c};
+    for (unsigned i = 0; i < 3; ++i) {
+        if (!(phases & (1u << i))) continue;
+        const int added = snprintf(text + length, sizeof(text) - length, names[i], values[i]);
+        if (added < 0 || added >= static_cast<int>(sizeof(text) - length)) return false;
+        length += added;
+    }
+    if (length + 2 >= static_cast<int>(sizeof(text))) return false;
+    text[length++] = '\r'; text[length++] = '\n';
+    return HAL_UART_Transmit_DMA(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length)) == HAL_OK;
+}
+
+// Append a signed decimal field to a bounded, fixed-size packet.
+void append_phase_number(char *text, unsigned &length, int32_t number)
+{
+    text[length++] = ',';
+    uint32_t magnitude;
+    if (number < 0) { text[length++] = '-'; magnitude = static_cast<uint32_t>(-number); }
+    else magnitude = static_cast<uint32_t>(number);
+    char digits[10]; unsigned count = 0;
+    do { digits[count++] = static_cast<char>('0' + magnitude % 10u); magnitude /= 10u; } while (magnitude);
+    while (count) text[length++] = digits[--count];
+}
+
+void send_phase_samples()
+{
+    if (huart2.gState != HAL_UART_STATE_READY) return;
+    const uint8_t selected = phase_telemetry_mask;
+    uint8_t read = phase_read;
+    const uint8_t available = (phase_write - read) & 127u;
+    if (!selected || available < 16u) return;
+    // Worst case: 16 * 3 * 7 bytes plus header, < 448 bytes.
+    static char text[448];
+    unsigned length = 3; text[0] = 'C'; text[1] = 'U'; text[2] = 'R';
+    const uint32_t first_frame = phase_samples[read].frame;
+    // Frame/drop are encoded as unsigned decimals (cast avoids signed rollover).
+    const int header = snprintf(text, sizeof(text), "CUR,%lu,%u,%lu,%lu",
+        static_cast<unsigned long>(first_frame), static_cast<unsigned>(selected),
+        static_cast<unsigned long>(phase_dropped),
+        static_cast<unsigned long>(sample_dt * 1000000000.0f + 0.5f));
+    if (header <= 0 || header >= static_cast<int>(sizeof(text))) return;
+    length = static_cast<unsigned>(header);
+    for (unsigned i = 0; i < 16u; ++i) {
+        const PhaseSample &sample = phase_samples[read];
+        // A full ring causes missed frames: terminate the batch before the gap.
+        if (sample.frame != first_frame + i * kPhaseStride) break;
+        if (selected & 1u) append_phase_number(text, length, sample.a);
+        if (selected & 2u) append_phase_number(text, length, sample.b);
+        if (selected & 4u) append_phase_number(text, length, sample.c);
+        read = (read + 1u) & 127u;
+    }
+    text[length++] = '\r'; text[length++] = '\n';
+    if (HAL_UART_Transmit_DMA(&huart2, reinterpret_cast<uint8_t *>(text),
+                              static_cast<uint16_t>(length)) == HAL_OK) phase_read = read;
 }
 
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
@@ -760,6 +861,7 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     }
     I_a = (zero_a - a) * kAmpsPerCount; I_b = (zero_b - b) * kAmpsPerCount;
     I_c = (zero_c - c) * kAmpsPerCount;
+    capture_phase_sample();
     last_I_alpha = I_alpha; last_I_beta = I_beta;
     clark(&I_a, &I_b, &I_c, &I_alpha, &I_beta);
     if (motor_state == IDLE || motor_state == RETRY_WAIT) {
@@ -890,7 +992,10 @@ void setup(void)
         if (frame != last_frame) { last_frame = frame; last_adc = now; }
         if (now - last_adc > 10u && motor_state != FAULT) motor_fail(ADC_TIMEOUT);
         service_restart();
-        if (now - last_status >= 100u) { last_status = now; send_status(); }
+        if (now - last_status >= 20u) {
+            // Give state/command acknowledgements priority over waveform data.
+            if (send_status()) last_status = now;
+        } else send_phase_samples();
         __WFI();
     }
 }
