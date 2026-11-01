@@ -59,9 +59,13 @@ MotorFault restart_reason = NO_FAULT;
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
 CommandResult command_result = COMMAND_NONE;
 uint8_t uart_rx_byte;
-volatile uint8_t uart_rx_data[64];
+volatile uint8_t uart_rx_data[256];
 volatile uint8_t uart_rx_write = 0, uart_rx_read = 0;
 volatile bool uart_rx_overflow = false, uart_rx_error = false;
+// UART and RX DMA IRQs must use the same preemption priority.  Both invoke
+// the receive-to-idle callback and therefore share this DMA cursor.
+volatile uint8_t uart_rx_dma_data[128];
+uint16_t uart_rx_dma_read = 0;
 SerialCommandParser command_parser = {};
 // Telemetry selection only; ADC sampling remains active for FOC and protection.
 volatile uint8_t phase_telemetry_mask = 0u;
@@ -624,11 +628,21 @@ void service_restart()
     __set_PRIMASK(mask);
 }
 
+HAL_StatusTypeDef start_uart_receive()
+{
+    if (huart2.hdmarx) {
+        if (huart2.hdmarx->Init.Mode != DMA_CIRCULAR) return HAL_ERROR;
+        uart_rx_dma_read = 0;
+        return HAL_UARTEx_ReceiveToIdle_DMA(&huart2, const_cast<uint8_t *>(uart_rx_dma_data), sizeof(uart_rx_dma_data));
+    }
+    return HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+}
+
 void service_serial()
 {
+recover_uart:
     if (uart_rx_overflow || uart_rx_error) {
         const uint32_t mask = __get_PRIMASK(); __disable_irq();
-        const bool error = uart_rx_error;
         uart_rx_read = uart_rx_write;
         uart_rx_overflow = uart_rx_error = false;
         command_parser.length = 0;
@@ -636,16 +650,19 @@ void service_serial()
         __set_PRIMASK(mask);
         service_command('S');
         command_result = COMMAND_RX;
-        if (error) {
-            HAL_UART_AbortReceive(&huart2);
-            if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
-        }
+        HAL_UART_AbortReceive(&huart2);
+        uart_rx_read = uart_rx_write;
+        if (start_uart_receive() != HAL_OK) { uart_rx_error = true; return; }
     }
-    while (uart_rx_read != uart_rx_write) {
+    while (!uart_rx_overflow && !uart_rx_error && uart_rx_read != uart_rx_write) {
         const uint8_t byte = uart_rx_data[uart_rx_read];
-        uart_rx_read = (uart_rx_read + 1u) & 63u;
+        uart_rx_read = static_cast<uint8_t>(uart_rx_read + 1u);
         SerialCommand command;
         if (!serial_command_feed(command_parser, byte, command)) continue;
+        // Do not execute an already-queued command after an RX fault.  ADC
+        // remains protected by the short bounded command critical section.
+        const uint32_t command_mask = __get_PRIMASK(); __disable_irq();
+        if (uart_rx_overflow || uart_rx_error) { __set_PRIMASK(command_mask); break; }
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
@@ -692,7 +709,9 @@ void service_serial()
                 command_result = COMMAND_OK;
             }
         } else command_result = COMMAND_FORMAT;
+        __set_PRIMASK(command_mask);
     }
+    if (uart_rx_overflow || uart_rx_error) goto recover_uart;
 }
 
 bool send_status()
@@ -938,11 +957,30 @@ extern "C" void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
 
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart != &huart2) return;
-    const uint8_t next = (uart_rx_write + 1u) & 63u;
+    if (huart != &huart2 || huart->hdmarx) return;
+    const uint8_t next = static_cast<uint8_t>(uart_rx_write + 1u);
     if (next == uart_rx_read) uart_rx_overflow = true;
     else { uart_rx_data[uart_rx_write] = uart_rx_byte; uart_rx_write = next; }
     if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
+}
+
+extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t)
+{
+    if (huart != &huart2 || !huart->hdmarx) return;
+    // Use the current hardware position rather than the event's Size. A
+    // delayed half/full interrupt may be delivered after a newer idle event.
+    // Both IRQs must run within half a DMA buffer time: NDTR cannot count
+    // complete unseen laps if interrupts are blocked for an entire buffer.
+    const uint16_t remaining = __HAL_DMA_GET_COUNTER(huart->hdmarx);
+    if (remaining > sizeof(uart_rx_dma_data)) { uart_rx_error = true; return; }
+    const uint16_t end = (sizeof(uart_rx_dma_data) - remaining) % sizeof(uart_rx_dma_data);
+    while (uart_rx_dma_read != end) {
+        const uint8_t next = static_cast<uint8_t>(uart_rx_write + 1u);
+        if (next == uart_rx_read) { uart_rx_overflow = true; break; }
+        uart_rx_data[uart_rx_write] = uart_rx_dma_data[uart_rx_dma_read];
+        uart_rx_write = next;
+        uart_rx_dma_read = (uart_rx_dma_read + 1u) % sizeof(uart_rx_dma_data);
+    }
 }
 
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -960,7 +998,7 @@ void setup(void)
     // No TIM4 reads or encoder startup. Ignore an unplugged Z input.
     CLEAR_BIT(EXTI->IMR1, ENCODE_ZERO_Pin); __HAL_GPIO_EXTI_CLEAR_IT(ENCODE_ZERO_Pin);
     bridge_off();
-    if (HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1) != HAL_OK) uart_rx_error = true;
+    if (start_uart_receive() != HAL_OK) uart_rx_error = true;
     RCC_ClkInitTypeDef clocks = {}; uint32_t latency = 0;
     HAL_RCC_GetClockConfig(&clocks, &latency);
     const float timer_clock = static_cast<float>(HAL_RCC_GetPCLK2Freq())
