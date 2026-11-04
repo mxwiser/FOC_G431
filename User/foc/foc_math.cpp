@@ -11,6 +11,14 @@ void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta){
     *alpha = (2.0f * *Ia - *Ib - *Ic) / 3.0f;
     *beta = (*Ib - *Ic) * ONE_BY_SQRT3;
 }
+void clark_two_phase_ab(const float *Ia,const float *Ib,float *alpha,float *beta){
+    // 利用 Ia + Ib + Ic = 0 化简三相公式，保持幅值不变，输出单位仍为 A。
+    // alpha 直接取 Ia；beta 只需两次乘法和一次加法，无需第三相参与运算。
+    const float a = *Ia;
+    const float b = *Ib;
+    *alpha = a;
+    *beta = (a + 2.0f * b) * ONE_BY_SQRT3;
+}
 void park(float *x1,float *y1,float *theta,float *x2,float *y2){
     float sn, cs;
     foc_fast_sincos(*theta, sn, cs);

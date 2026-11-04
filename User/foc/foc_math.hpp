@@ -31,7 +31,13 @@ extern "C" {
  * Nonpositive dt or output_limit clears integral, last_input and output.
  */
 void calculate_PI(PID *pid);
+// 三相幅值不变 Clarke 变换：适用于三相电流在同一时刻采样的情况。
 void clark(float *Ia,float *Ib,float *Ic,float *alpha,float *beta);
+/* 两相幅值不变 Clarke 变换：输入为同一时刻采样的 A、B 相电流，单位为 A。
+ * 假设三相电流之和为零：Ic = -Ia - Ib，化简得 alpha = Ia，beta = (Ia + 2*Ib)/sqrt(3)。
+ * 不读取 C 相，也不需要显式重建 Ic；输出的幅值、单位及坐标方向与 clark 一致。
+ */
+void clark_two_phase_ab(const float *Ia,const float *Ib,float *alpha,float *beta);
 void park(float *x1,float *y1,float *theta,float *x2,float *y2);
 void calculate_foc(float Ia,float Ib,float Ic,float theta,uint32_t &tAout,uint32_t &tBout,uint32_t &tCout);
 void calculate_Idq(float I_a, float I_b, float I_c,float,float &Id,float &Iq);

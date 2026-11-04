@@ -862,6 +862,8 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     if (hadc != &hadc1) return;
     ++sample_frames;
     const volatile uint16_t *samples = adc_buffer;
+    // 双 ADC 规则同步采样的 DMA 排列：Rank 1 为 ADC1/A、ADC2/B，Rank 2 为 ADC1/母线、ADC2/C。
+    // A、B 相采样时刻一致；C 相晚一个转换序列步，不能与 A、B 当作同一时刻的三相电流。
     const uint16_t a = samples[0], b = samples[1], bus = samples[2], c = samples[3];
     Udc_quant = bus * (3.3f / 4095.0f) * (187.0f / 18.0f);
     if (motor_state == FAULT) { bridge_off(); return; }
@@ -882,7 +884,8 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     I_c = (zero_c - c) * kAmpsPerCount;
     capture_phase_sample();
     last_I_alpha = I_alpha; last_I_beta = I_beta;
-    clark(&I_a, &I_b, &I_c, &I_alpha, &I_beta);
+    // 电流环和观测器仅使用同步采样的 A、B 相做两相 Clarke；C 相实测值保留用于保护和遥测。
+    clark_two_phase_ab(&I_a, &I_b, &I_alpha, &I_beta);
     if (motor_state == IDLE || motor_state == RETRY_WAIT) {
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
         record_current_diagnostic();
