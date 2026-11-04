@@ -167,13 +167,21 @@ void vesc_observer_reset(const VescObserverConfig &config,
         state.flux_magnitude = config.flux_linkage;
         // 每次启动/重试都从标称磁链开始，不能沿用上次停机前的自适应结果。
         state.lambda_est = config.flux_linkage;
-        state.lambda_ratio = 1.0f;
     }
+}
+
+float vesc_observer_gain(float configured_gain, float slow_gain, float duty, float bus_voltage)
+{
+    // 对应 VESC mcpwm_foc.c：将 |duty| 从 [0, 40/Vbus] 映射到 [0, configured_gain]。
+    float gamma = foc_abs(duty) * configured_gain / (40.0f / bus_voltage);
+    const float minimum = slow_gain * configured_gain;
+    if (gamma < minimum) gamma = minimum;
+    return gamma * 4.0f;
 }
 
 bool vesc_observer_update(const VescObserverConfig &config,
                           VescObserverState &state, float U_alpha, float U_beta,
-                          float I_alpha, float I_beta, float dt, bool config_validated, bool adapt_flux)
+                          float I_alpha, float I_beta, float dt, bool config_validated)
 {
     if (!foc_finite(dt) || dt <= 0.0f || dt > 0.001f ||
         (!config_validated && (!foc_finite(config.resistance) || config.resistance <= 0.0f ||
@@ -186,8 +194,7 @@ bool vesc_observer_update(const VescObserverConfig &config,
         !foc_finite(U_alpha) || !foc_finite(U_beta) ||
         !foc_finite(I_alpha) || !foc_finite(I_beta) ||
         !foc_finite(state.x1) || !foc_finite(state.x2) ||
-        !foc_finite(state.lambda_est) || !foc_finite(state.lambda_ratio) ||
-        !(state.lambda_ratio > 0.0f) ||
+        !foc_finite(state.lambda_est) || !(state.lambda_est > 0.0f) ||
         !foc_finite(state.pll_angle) || !foc_finite(state.speed)) {
         VescObserverState cleared = {};
         state = cleared;
@@ -198,21 +205,16 @@ bool vesc_observer_update(const VescObserverConfig &config,
     const float L_ib = config.inductance * I_beta;
     const float flux_a = state.x1 - L_ia;
     const float flux_b = state.x2 - L_ib;
-    // 使用当前滤波尺度下的自适应磁链作为 Ortega 收敛半径。
-    // 标称磁链可能因转速相关的滤波补偿而变化，保留比例可避免产生虚假的磁链自适应。
-    state.lambda_est = config.flux_linkage * state.lambda_ratio;
+    // 与 VESC ORTEGA_LAMBDA_COMP 一致，直接使用物理磁链估计值计算完整误差。
     float error = state.lambda_est * state.lambda_est
         - flux_a * flux_a - flux_b * flux_b;
     const float gamma_half = config.gain * 0.5f;
-    // VESC ORTEGA_LAMBDA_COMP：lambda += -0.2 * gamma_half * lambda * error * dt。
-    // 除以本次更新中固定的标称磁链，得到等价的比例更新，避免额外的浮点除法。
-    // 此处必须使用带符号的完整误差，才能使磁链估计既能增大也能减小。
-    if (adapt_flux) {
-        state.lambda_ratio -= 0.2f * gamma_half * state.lambda_ratio * error * dt;
-        if (state.lambda_ratio < 0.3f) state.lambda_ratio = 0.3f;
-        if (state.lambda_ratio > 2.5f) state.lambda_ratio = 2.5f;
-    }
-    state.lambda_est = config.flux_linkage * state.lambda_ratio;
+    // 先用有符号误差更新 lambda_est，使其可增可减，再按标称磁链的 0.3~2.5 倍限幅。
+    state.lambda_est += 0.2f * gamma_half * state.lambda_est * -error * dt;
+    const float lambda_min = config.flux_linkage * 0.3f;
+    const float lambda_max = config.flux_linkage * 2.5f;
+    if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
+    if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
     // 与 VESC 一致，仅磁链矢量的非线性校正项抑制正误差。
     if (error > 0.0f) error = 0.0f;
     state.x1 += (U_alpha - config.resistance * I_alpha
@@ -221,8 +223,8 @@ bool vesc_observer_update(const VescObserverConfig &config,
         + gamma_half * flux_b * error) * dt;
 
     const float stator_magnitude = foc_sqrt(state.x1 * state.x1 + state.x2 * state.x2);
-    // 防塌陷阈值跟随自适应磁链，避免有效的小磁链被按标称值反复放大。
-    if (stator_magnitude < state.lambda_est * 0.5f) {
+    // 与 VESC 一致，磁链矢量过小时按标称磁链的 0.5 倍阈值进行恢复。
+    if (stator_magnitude < config.flux_linkage * 0.5f) {
         state.x1 *= 1.1f;
         state.x2 *= 1.1f;
     }
@@ -237,7 +239,7 @@ bool vesc_observer_update(const VescObserverConfig &config,
     const float filter = dt / (0.02f + dt);
     state.phase_error += filter * (foc_abs(delta) - state.phase_error);
     if (!foc_finite(state.flux_magnitude) || !foc_finite(state.speed) ||
-        !foc_finite(state.lambda_est) || !foc_finite(state.lambda_ratio) ||
+        !foc_finite(state.lambda_est) ||
         !foc_finite(state.x1) || !foc_finite(state.x2)) {
         VescObserverState cleared = {};
         state = cleared;

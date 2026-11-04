@@ -42,8 +42,7 @@ uint32_t state_samples;
 float align_d, align_q;
 float blend_offset;
 float observer_phase;
-float filtered_U_alpha, filtered_U_beta, filtered_I_alpha, filtered_I_beta;
-const float kObserverFilterSeconds = 0.0003f;
+float observer_gain_base;
 float motor_resistance = cfg::resistance;
 float motor_inductance = cfg::inductance;
 float motor_flux = cfg::flux_linkage;
@@ -114,7 +113,7 @@ struct CurrentDiagnosticSample {
     uint16_t raw_a, raw_b, raw_c, raw_bus;
     float ia, ib, ic, id, iq, iqref, phase, observer_phase, speed, flux,
         bus, va, vb, command_va, command_vb, integral_d, integral_q,
-        filtered_ia, filtered_ib, phase_error, raw_angle, pll_angle;
+        observer_ia, observer_ib, phase_error, raw_angle, pll_angle;
     uint32_t ccr_a, ccr_b, ccr_c;
 };
 CurrentDiagnosticSample current_diag[192];
@@ -240,13 +239,13 @@ void configure_controllers()
     observer_config.inductance = motor_inductance;
     observer_config.flux_linkage = motor_flux;
     // VESC detection uses gamma = 500 / lambda^2.
-    observer_config.gain = motor_flux > 0.0f ? 500.0f / (motor_flux * motor_flux) : 0.0f;
+    observer_gain_base = motor_flux > 0.0f ? 500.0f / (motor_flux * motor_flux) : 0.0f;
+    observer_config.gain = observer_gain_base * cfg::observer_gain_slow * 4.0f;
     observer_config.pll_kp = 1000.0f;
     observer_config.pll_ki = 250000.0f;
     observer_config.minimum_speed = cfg::minimum_rad_s;
     vesc_observer_reset(observer_config, observer, 0.0f);
     observer_phase = 0.0f;
-    filtered_U_alpha = filtered_U_beta = filtered_I_alpha = filtered_I_beta = 0.0f;
     speed_reference = speed_feedback = speed_elapsed = 0.0f;
 }
 
@@ -503,8 +502,6 @@ void control_sample()
             vesc_observer_reset(observer_config, observer, 0.0f);
             observer.x1 += motor_inductance * I_alpha; observer.x2 += motor_inductance * I_beta;
             observer_phase = 0.0f;
-            filtered_I_alpha = I_alpha; filtered_I_beta = I_beta;
-            filtered_U_alpha = applied_alpha; filtered_U_beta = applied_beta;
             enter_state(OPEN_LOOP);
         }
         return;
@@ -830,7 +827,7 @@ void record_current_diagnostic()
         r.va = applied_alpha; r.vb = applied_beta;
         r.command_va = prior_alpha * Udc_quant; r.command_vb = prior_beta * Udc_quant;
         r.integral_d = pi_d.integral; r.integral_q = pi_q.integral;
-        r.filtered_ia = filtered_I_alpha; r.filtered_ib = filtered_I_beta;
+        r.observer_ia = I_alpha; r.observer_ib = I_beta;
         r.phase_error = observer.phase_error;
         r.raw_angle = observer.angle; r.pll_angle = observer.pll_angle;
         r.ccr_a = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
@@ -905,32 +902,17 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
 #if defined(STM32G431xx)
         const uint32_t start_cycles = DWT->CYCCNT;
 #endif
-        // Matched filtering keeps v = R*i + L*di/dt + emf consistent while
-        // rejecting sample ripple. Compensate its phase lag on the raw angle.
-        const float filter = sample_dt / (kObserverFilterSeconds + sample_dt);
-        filtered_U_alpha += filter * (applied_alpha - filtered_U_alpha);
-        filtered_U_beta += filter * (applied_beta - filtered_U_beta);
-        filtered_I_alpha += filter * (I_alpha - filtered_I_alpha);
-        filtered_I_beta += filter * (I_beta - filtered_I_beta);
-        // 电压/电流的匹配低通也会衰减旋转磁链，按离散一阶滤波响应补偿标称磁链及相位。
-        // LAMBDA_COMP 在内部保留自适应磁链与标称值的比例，转速改变时不会重置该比例。
-        // 物理尺度下的在线磁链估计为 motor_flux * observer.lambda_ratio；不覆盖辨识值 motor_flux。
-        float filter_sn, filter_cs;
-        foc_fast_sincos(observer.speed * sample_dt, filter_sn, filter_cs);
-        const float retained = 1.0f - filter;
-        const float filter_real = 1.0f - retained * filter_cs;
-        const float filter_imag = retained * filter_sn;
-        observer_config.flux_linkage = motor_flux * filter /
-            foc_sqrt(filter_real * filter_real + filter_imag * filter_imag);
-        observer_config.gain = 500.0f /
-            (observer_config.flux_linkage * observer_config.flux_linkage);
-        // 开环启动先按标称磁链收敛；确认锁定并进入交接后，再在线跟踪磁链变化。
-        // 防止低速反电势过小、初始积分偏置或采样噪声使自适应磁链提前漂移。
-        const bool adapt_flux = motor_state == BLEND || motor_state == RUN;
-        if (!vesc_observer_update(observer_config, observer, filtered_U_alpha, filtered_U_beta,
-                                  filtered_I_alpha, filtered_I_beta, sample_dt, true, adapt_flux)) motor_fail(NUMERIC_ERROR);
-        observer_phase = vesc_observer_wrap(observer.angle +
-            foc_fast_atan2(filter_imag, filter_real));
+        // 对齐 VESC 的增益调度。prior_alpha/beta 为上一条实际 PWM 电压与母线电压之比，
+        // |duty| = sqrt(3) * |Ualpha_beta| / Udc（对应 VESC 的 overmod_factor = 1）。
+        const float duty = 1.7320508075688772f *
+            foc_sqrt(prior_alpha * prior_alpha + prior_beta * prior_beta);
+        observer_config.gain = vesc_observer_gain(observer_gain_base, cfg::observer_gain_slow,
+                                                   duty, Udc_quant);
+        // 重建电压和同步采样的两相 Clarke 电流直接送入观测器，不增加低通或滤波补偿。
+        // 每次执行观测器均更新 lambda_est，与 VESC 的 ORTEGA_LAMBDA_COMP 分支一致。
+        if (!vesc_observer_update(observer_config, observer, applied_alpha, applied_beta,
+                                  I_alpha, I_beta, sample_dt, true)) motor_fail(NUMERIC_ERROR);
+        observer_phase = observer.angle;
 #if defined(STM32G431xx)
         const uint32_t cycles = DWT->CYCCNT - start_cycles;
         if (cycles > observer_max_cycles) observer_max_cycles = cycles;

@@ -55,6 +55,7 @@ const float min_bus = FOC_MIN_BUS;
 const float max_bus = FOC_MAX_BUS;
 const float direction = FOC_SENSORLESS_DIRECTION;
 const float max_modulation = 0.8f;          // Preserve low-side sampling time.
+const float observer_gain_slow = 0.05f;     // VESC 默认的低占空比观测器增益比例。
 const float current_bandwidth = 500.0f;     // rad/s; alignment, open loop, detection.
 const float run_current_bandwidth = FOC_RUN_CURRENT_BANDWIDTH; // rad/s; closed-loop current tracking.
 // Reserve voltage for d-axis regulation before back EMF saturates the bridge.

@@ -7,7 +7,7 @@
 struct VescObserverConfig {
     float resistance;
     float inductance;
-    float flux_linkage;   // 标称磁链，Wb；应与观测器输入具有相同的滤波幅值尺度。
+    float flux_linkage;   // 配置/辨识得到的标称物理磁链，Wb。
     float gain;           // VESC gamma; correction uses gain / 2.
     float pll_kp;
     float pll_ki;
@@ -21,8 +21,7 @@ struct VescObserverState {
     float pll_angle;
     float speed;          // Signed electrical rad/s.
     float flux_magnitude;
-    float lambda_est;     // 自适应磁链，Wb；与观测器的滤波输入处于同一尺度。
-    float lambda_ratio;   // 自适应磁链/标称磁链，范围 0.3~2.5；跨滤波幅值补偿保存。
+    float lambda_est;     // 与 VESC 一致，直接保存在线估计的物理磁链，Wb。
     float phase_error;
     bool ready;           // Quality indication, not proof of rotor motion.
 };
@@ -56,8 +55,10 @@ float foc_fast_atan2(float y, float x);
 float vesc_observer_wrap(float angle);
 void vesc_observer_reset(const VescObserverConfig &config,
                          VescObserverState &state, float angle);
-// 首次使用前先 reset；adapt_flux=false 冻结自适应比例，仍更新磁链矢量、角度和速度。
+// VESC 的母线电压/占空比增益调度；返回值对应 m_gamma_now。
+float vesc_observer_gain(float configured_gain, float slow_gain, float duty, float bus_voltage);
+// 首次使用前先 reset；每次调用都按 ORTEGA_LAMBDA_COMP 更新自适应磁链。
 bool vesc_observer_update(const VescObserverConfig &config,
                           VescObserverState &state, float U_alpha, float U_beta,
                           float I_alpha, float I_beta, float dt,
-                          bool config_validated = false, bool adapt_flux = true);
+                          bool config_validated = false);
