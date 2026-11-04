@@ -2,8 +2,12 @@
 #include <float.h>
 #include <cmath>
 
-// Ortega LAMBDA_COMP observer and PLL adapted from bldc-master/motor/foc_math.c.
+// LAMBDA_COMP observers and PLL adapted from bldc-master/motor/foc_math.c.
 // Implementation is in the already registered foc_math.cpp; no IDE edits needed.
+enum VescObserverType {
+    VESC_OBSERVER_ORTEGA_LAMBDA_COMP,
+    VESC_OBSERVER_MXLEMMING_LAMBDA_COMP
+};
 struct VescObserverConfig {
     float resistance;
     float inductance;
@@ -12,6 +16,7 @@ struct VescObserverConfig {
     float pll_kp;
     float pll_ki;
     float minimum_speed;  // Electrical rad/s.
+    VescObserverType type;
 };
 
 struct VescObserverState {
@@ -22,6 +27,8 @@ struct VescObserverState {
     float speed;          // Signed electrical rad/s.
     float flux_magnitude;
     float lambda_est;     // 与 VESC 一致，直接保存在线估计的物理磁链，Wb。
+    float i_alpha_last;   // MXLEMMING 的电感电流差分项，保存上一拍实测电流。
+    float i_beta_last;
     float phase_error;
     bool ready;           // Quality indication, not proof of rotor motion.
 };
@@ -57,7 +64,7 @@ void vesc_observer_reset(const VescObserverConfig &config,
                          VescObserverState &state, float angle);
 // VESC 的母线电压/占空比增益调度；返回值对应 m_gamma_now。
 float vesc_observer_gain(float configured_gain, float slow_gain, float duty, float bus_voltage);
-// 首次使用前先 reset；每次调用都按 ORTEGA_LAMBDA_COMP 更新自适应磁链。
+// 首次使用前先 reset；每次调用都按所选 VESC 分支更新自适应磁链。
 bool vesc_observer_update(const VescObserverConfig &config,
                           VescObserverState &state, float U_alpha, float U_beta,
                           float I_alpha, float I_beta, float dt,

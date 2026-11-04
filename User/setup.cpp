@@ -7,6 +7,7 @@
 #include "foc/foc_math.hpp"
 #include "foc/svpwm.h"
 #include "foc/vesc_observer.hpp"
+#include "foc/vesc_startup.hpp"
 #include "serial_command.hpp"
 #include <cmath>
 #include <stdio.h>
@@ -16,11 +17,13 @@
 
 namespace {
 namespace cfg = sensorless_config;
+const VescObserverType kObserverType = cfg::use_mxlemming
+    ? VESC_OBSERVER_MXLEMMING_LAMBDA_COMP : VESC_OBSERVER_ORTEGA_LAMBDA_COMP;
 const float kPi = 3.14159265358979323846f;
 const float kAmpsPerCount = 0.02946541f;
 const uint32_t kZeroSamples = 2048u;
 enum MotorState { ZERO, IDLE, BOOTSTRAP, DETECT_R, DETECT_L,
-    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND, RUN, FAULT, RETRY_WAIT };
+    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND /* 旧协议保留值，正常启动不再经过此状态 */, RUN, FAULT, RETRY_WAIT };
 enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
     BAD_BUS, BAD_CONFIG, ALIGN_FAILED, STARTUP_TIMEOUT,
     LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR };
@@ -40,7 +43,6 @@ float Udc_quant, electrical_angle, openloop_angle, openloop_speed;
 float sample_dt, state_time, stable_time, lost_time;
 uint32_t state_samples;
 float align_d, align_q;
-float blend_offset;
 float observer_phase;
 float observer_gain_base;
 float motor_resistance = cfg::resistance;
@@ -105,6 +107,9 @@ float applied_alpha, applied_beta, last_I_alpha, last_I_beta;
 PID pi_d = {}, pi_q = {}, pi_speed = {};
 VescObserverConfig observer_config = {};
 VescObserverState observer = {};
+VescStartupConfig startup_config = {};
+VescStartupState startup = {};
+float startup_elapsed, startup_iq_filtered;
 
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
 // Optional SWD capture; omitted entirely from normal firmware.
@@ -165,25 +170,6 @@ void enter_state(MotorState state)
     state_time = stable_time = lost_time = 0.0f;
     state_samples = 0;
     if (state == ALIGN) { align_d = I_alpha; align_q = I_beta; }
-    if (state == BLEND) {
-        pi_d.kp = pi_q.kp = motor_inductance * cfg::run_current_bandwidth;
-        pi_d.ki = pi_q.ki = motor_resistance * cfg::run_current_bandwidth;
-        blend_offset = vesc_observer_wrap(openloop_angle
-            - observer_phase - observer.speed * sample_dt * 0.5f);
-        {
-            // Preserve the torque already produced during open-loop tracking.
-            // Starting from zero can drop below the sensorless minimum speed.
-            float sn, cs;
-            foc_fast_sincos(blend_offset, sn, cs);
-            const float torque = cfg::direction * (I_d * sn + I_q * cs);
-            const float limit = current_mode ? iq_setpoint : speed_current_limit;
-            iq_reference = cfg::direction * (torque < 0.0f ? 0.0f :
-                (torque > limit ? limit : torque));
-            speed_reference = speed_feedback = cfg::direction * observer.speed;
-            speed_elapsed = 0.0f;
-            pi_speed.integral = pi_speed.output = cfg::direction * iq_reference;
-        }
-    }
     if (state == RUN && current_mode) {
         const float torque_current = cfg::direction * I_q;
         pi_speed.integral = torque_current < 0.0f ? 0.0f :
@@ -233,8 +219,9 @@ void configure_controllers()
     pi_speed.ki = cfg::speed_ki;
     pi_speed.output_limit = speed_current_limit;
     pi_d.dt = pi_q.dt = sample_dt;
-    pi_d.kp = pi_q.kp = motor_inductance * cfg::current_bandwidth;
-    pi_d.ki = pi_q.ki = motor_resistance * cfg::current_bandwidth;
+    const float bandwidth = detecting ? cfg::current_bandwidth : cfg::run_current_bandwidth;
+    pi_d.kp = pi_q.kp = motor_inductance * bandwidth;
+    pi_d.ki = pi_q.ki = motor_resistance * bandwidth;
     observer_config.resistance = motor_resistance;
     observer_config.inductance = motor_inductance;
     observer_config.flux_linkage = motor_flux;
@@ -244,8 +231,19 @@ void configure_controllers()
     observer_config.pll_kp = 1000.0f;
     observer_config.pll_ki = 250000.0f;
     observer_config.minimum_speed = cfg::minimum_rad_s;
+    observer_config.type = kObserverType;
     vesc_observer_reset(observer_config, observer, 0.0f);
     observer_phase = 0.0f;
+    VescStartupState cleared_startup = {};
+    startup = cleared_startup;
+    startup_elapsed = startup_iq_filtered = 0.0f;
+    startup_config.openloop_speed = cfg::startup_openloop_rad_s;
+    startup_config.openloop_low = cfg::startup_openloop_low;
+    startup_config.hysteresis_seconds = cfg::startup_hysteresis_seconds;
+    startup_config.lock_seconds = cfg::startup_lock_seconds;
+    startup_config.ramp_seconds = cfg::startup_ramp_seconds;
+    startup_config.hold_seconds = cfg::startup_hold_seconds;
+    startup_config.flux_linkage = motor_flux;
     speed_reference = speed_feedback = speed_elapsed = 0.0f;
 }
 
@@ -343,6 +341,8 @@ void current_control(float angle, float target_d, float target_q)
     foc_fast_sincos(angle, sn, cs);
     I_d = I_alpha * cs + I_beta * sn;
     I_q = -I_alpha * sn + I_beta * cs;
+    // 与 VESC 的 iq_filter 一致，仅用于低速辅助管理，观测器仍使用未滤波的 alpha/beta 电流。
+    startup_iq_filtered += 0.1f * (I_q - startup_iq_filtered);
     const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
     pi_d.output_limit = pi_q.output_limit = maximum;
     pi_d.input = target_d - I_d; pi_q.input = target_q - I_q;
@@ -351,11 +351,9 @@ void current_control(float angle, float target_d, float target_q)
     if (!detecting && motor_state != ALIGN && motor_flux > 0.0f) {
         // VESC-style cross-coupling and back-EMF feedforward. Important when
         // R and L are small: PI alone reacts too late during acceleration.
-        float speed = openloop_speed;
-        if (motor_state == BLEND) {
-            const float fraction = state_time < cfg::blend_seconds ? state_time / cfg::blend_seconds : 1.0f;
-            speed += fraction * (observer.speed - speed);
-        } else if (motor_state == RUN) speed = observer.speed;
+        float speed = motor_state == OPEN_LOOP && !detecting && !startup.phase_override
+            ? observer.speed : openloop_speed;
+        if (motor_state == RUN) speed = observer.speed;
         const float difference = motor_state == OPEN_LOOP ? 0.0f :
             vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f - angle);
         float difference_sin, difference_cos;
@@ -473,20 +471,77 @@ void update_flux()
     }
 }
 
+void sensorless_drive_sample()
+{
+    // VESC 的低速辅助按 1 kHz 运行；电流环与观测器仍按 ADC 采样频率执行。
+    startup_elapsed += sample_dt;
+    if (startup_elapsed >= cfg::startup_manager_seconds) {
+        float sn, cs;
+        foc_fast_sincos(electrical_angle, sn, cs);
+        const float q_voltage = prior_beta * cs - prior_alpha * sn;
+        const float duty_magnitude = 1.7320508075688772f *
+            foc_sqrt(prior_alpha * prior_alpha + prior_beta * prior_beta);
+        const float duty = q_voltage < 0.0f ? -duty_magnitude : duty_magnitude;
+        const float maximum_current = current_mode ? cfg::max_iq : speed_current_limit;
+        vesc_startup_update(startup_config, startup, observer_phase, observer.speed,
+                            startup_iq_filtered, maximum_current, duty, true, cfg::startup_manager_seconds);
+        startup_elapsed -= cfg::startup_manager_seconds;
+    }
+
+    float phase = vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f);
+    if (startup.phase_override) {
+        // 与 VESC 的 FOC_SENSOR_MODE_SENSORLESS 分支一致：强制相位驱动，同时预置观测器磁链。
+        phase = startup.phase;
+        observer.x1 = startup.x1;
+        observer.x2 = startup.x2;
+    }
+    openloop_angle = startup.phase;
+    openloop_speed = startup.forced_speed;
+    update_iq_voltage_limit();
+    float reference;
+    if (current_mode) {
+        const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
+        reference = iq_reference + clamp(cfg::direction * allowed - iq_reference,
+                                            cfg::iq_slew_per_second * sample_dt);
+        if (cfg::direction * reference > iq_voltage_limit) reference = cfg::direction * iq_voltage_limit;
+    } else reference = speed_control_reference();
+    // VESC 无感启动和运行都使用 Iq 产生转矩，Id 目标保持为零。
+    // 开环辅助定时结束便直接使用观测器相位；速度环不再等待原先连续 0.2 秒的接管门槛。
+    current_control(phase, 0.0f, reference);
+
+    const bool quality = !startup.phase_override && observer.ready &&
+        cfg::direction * observer.speed > cfg::minimum_rad_s && foc_abs(observer.speed) * sample_dt < 0.8f;
+    if (motor_state == OPEN_LOOP) {
+        // 以下仅确认启动成功并保留 G431 原有超时/冷却保护，不阻塞上述 Iq/速度闭环控制。
+        // 使用累加/衰减的滞回，单个采样抖动不会清空已经取得的稳定时间。
+        if (quality) stable_time += sample_dt;
+        else if (stable_time > 0.0f) stable_time -= sample_dt;
+        if (stable_time >= cfg::lock_seconds) { enter_state(RUN); return; }
+        if (state_time >= cfg::startup_timeout) retry_motor(STARTUP_TIMEOUT);
+    } else {
+        if (quality) lost_time = 0.0f; else lost_time += sample_dt;
+        if (lost_time >= cfg::lost_seconds) retry_motor(LOST_LOCK);
+    }
+}
+
 void control_sample()
 {
     state_time = ++state_samples * sample_dt;
     if (motor_state == BOOTSTRAP) {
         if (state_time >= 0.005f) {
             if (detecting) { detect_voltage = 0.0f; detect_stage = 0; enter_state(DETECT_R); }
-            else { configure_controllers(); openloop_angle = openloop_speed = 0.0f; enter_state(ALIGN); }
+            else { configure_controllers(); openloop_angle = openloop_speed = 0.0f; enter_state(OPEN_LOOP); }
         }
         return;
     }
     if (motor_state == DETECT_R) { update_resistance(); return; }
     if (motor_state == DETECT_L) { update_inductance(); return; }
     if (motor_state == DETECT_FLUX) { update_flux(); return; }
+    if (!detecting && (motor_state == OPEN_LOOP || motor_state == RUN)) {
+        sensorless_drive_sample(); return;
+    }
     if (motor_state == ALIGN) {
+        // 仅参数辨识流程使用 Id 对齐；正常启动已在 BOOTSTRAP 后直接进入 Iq 驱动。
         const float fraction = state_time < 0.3f ? state_time / 0.3f : 1.0f;
         current_control(0.0f, cfg::current * fraction, 0.0f);
         const float filter = sample_dt / (0.01f + sample_dt);
@@ -500,7 +555,9 @@ void control_sample()
                 return;
             }
             vesc_observer_reset(observer_config, observer, 0.0f);
-            observer.x1 += motor_inductance * I_alpha; observer.x2 += motor_inductance * I_beta;
+            if (observer_config.type == VESC_OBSERVER_ORTEGA_LAMBDA_COMP) {
+                observer.x1 += motor_inductance * I_alpha; observer.x2 += motor_inductance * I_beta;
+            }
             observer_phase = 0.0f;
             enter_state(OPEN_LOOP);
         }
@@ -513,55 +570,10 @@ void control_sample()
         openloop_speed += clamp(destination - openloop_speed, step);
         openloop_angle = vesc_observer_wrap(openloop_angle + openloop_speed * sample_dt);
         current_control(openloop_angle, cfg::current, 0.0f);
-        if (detecting) {
-            if (foc_abs(openloop_speed - destination) < 0.01f) enter_state(DETECT_FLUX);
-            return;
-        }
-        if (observer.ready && cfg::direction * observer.speed > cfg::minimum_rad_s &&
-            foc_abs(observer.speed - openloop_speed) < 0.2f * cfg::openloop_rad_s &&
-            foc_abs(vesc_observer_wrap(observer_phase - openloop_angle)) < 0.7f) stable_time += sample_dt;
-        else stable_time = 0.0f;
-        if (stable_time >= cfg::lock_seconds) { enter_state(BLEND); return; }
-        if (state_time >= cfg::startup_timeout) retry_motor(STARTUP_TIMEOUT);
+        if (foc_abs(openloop_speed - destination) < 0.01f) enter_state(DETECT_FLUX);
         return;
     }
-    const bool quality = observer.ready && cfg::direction * observer.speed > cfg::minimum_rad_s &&
-        foc_abs(observer.speed) * sample_dt < 0.8f;
-    if (quality) lost_time = 0.0f; else lost_time += sample_dt;
-    if (lost_time >= cfg::lost_seconds) { retry_motor(LOST_LOCK); return; }
-    // Current-sample observer phase, then sample-to-valley compensation.
-    const float phase = vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f);
-    update_iq_voltage_limit();
-    if (motor_state == BLEND) {
-        const float fraction = state_time < cfg::blend_seconds ? state_time / cfg::blend_seconds : 1.0f;
-        // Follow observer speed immediately; fade only the initial angle offset.
-        // Interpolating two independently moving angles can jump by 2*pi.
-        const float angle = vesc_observer_wrap(phase + (1.0f - fraction) * blend_offset);
-        float reference;
-        if (current_mode) {
-            // Start the commanded torque ramp during handover. A fixed 1 A
-            // pulse here bypasses IQ= and can accelerate a light rotor before
-            // RUN has a chance to slew down to the user's requested current.
-            const float target = cfg::direction * iq_setpoint;
-            reference = iq_reference + clamp(target - iq_reference,
-                cfg::iq_slew_per_second * sample_dt);
-        } else reference = speed_control_reference();
-        current_control(angle, cfg::current * (1.0f - fraction), reference);
-        if (fraction >= 1.0f) enter_state(RUN);
-    } else if (motor_state == RUN) {
-        if (current_mode) {
-            const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
-            const float target = cfg::direction * allowed;
-            float reference = iq_reference + clamp(target - iq_reference,
-                cfg::iq_slew_per_second * sample_dt);
-            // Voltage headroom can disappear faster than a user-command ramp.
-            if (cfg::direction * reference > iq_voltage_limit)
-                reference = cfg::direction * iq_voltage_limit;
-            current_control(phase, 0.0f, reference);
-        } else {
-            current_control(phase, 0.0f, speed_control_reference());
-        }
-    }
+    motor_fail(BAD_CONFIG);
 }
 
 bool start_motor(bool detect)
@@ -730,6 +742,8 @@ bool send_status()
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
     const bool ready = parameters_ready, locked = observer.ready && !inactive;
+    const bool forced_phase = !inactive && !detecting && startup.phase_override;
+    const char observer_type = observer_config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP ? 'M' : 'O';
     const uint32_t frames = sample_frames;
     const float target_iq = iq_setpoint, reference_iq = iq_reference, iq_cap = iq_voltage_limit;
     const bool mode = current_mode, armed = run_requested;
@@ -742,14 +756,14 @@ bool send_status()
     const float speed_limit = speed_current_limit;
     __set_PRIMASK(mask);
     int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u,ol=%d,obs=%c",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
         static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
         mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
         static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap,
-        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases));
+        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases), forced_phase ? 1 : 0, observer_type);
     if (length <= 0 || length >= static_cast<int>(sizeof(text))) return false;
     const char *names[] = {",i_a=%.4f", ",i_b=%.4f", ",i_c=%.4f"};
     const float values[] = {phase_a, phase_b, phase_c};
@@ -897,7 +911,7 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     applied_alpha = Udc_quant * 0.5f * (prior_alpha + older_alpha);
     applied_beta = Udc_quant * 0.5f * (prior_beta + older_beta);
     const bool update_observer = !detecting &&
-        (motor_state == OPEN_LOOP || motor_state == BLEND || motor_state == RUN);
+        (motor_state == OPEN_LOOP || motor_state == RUN);
     if (update_observer && motor_state != FAULT) {
 #if defined(STM32G431xx)
         const uint32_t start_cycles = DWT->CYCCNT;
@@ -977,6 +991,8 @@ extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 void setup(void)
 {
+    // 零点采集/待机时也准确报告所选类型；控制器其余参数仍在每次启动时初始化。
+    observer_config.type = kObserverType;
 #if defined(STM32G431xx)
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0;

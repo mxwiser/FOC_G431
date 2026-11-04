@@ -101,7 +101,8 @@ void Foc_motor::updateSvpwm(uint32_t &tA, uint32_t &tB, uint32_t &tC)
 /*
  * Copyright 2016 - 2022 Benjamin Vedder <benjamin@vedder.se>
  * Adapted from bldc-master/motor/foc_math.c:
- * FOC_OBSERVER_ORTEGA_LAMBDA_COMP and foc_pll_run, plus fast sine/cosine/atan2
+ * FOC_OBSERVER_ORTEGA_LAMBDA_COMP, FOC_OBSERVER_MXLEMMING_LAMBDA_COMP,
+ * and foc_pll_run, plus fast sine/cosine/atan2
  * from bldc-master/util/utils_math.c (same copyright and GPL-3.0-or-later).
  *
  * This part is free software: you can redistribute it and/or modify it under
@@ -190,37 +191,71 @@ bool vesc_observer_update(const VescObserverConfig &config,
         !foc_finite(config.gain) || config.gain <= 0.0f ||
         !foc_finite(config.pll_kp) || config.pll_kp <= 0.0f ||
         !foc_finite(config.pll_ki) || config.pll_ki <= 0.0f ||
+        (config.type != VESC_OBSERVER_ORTEGA_LAMBDA_COMP &&
+         config.type != VESC_OBSERVER_MXLEMMING_LAMBDA_COMP) ||
         !foc_finite(config.minimum_speed) || config.minimum_speed <= 0.0f)) ||
         !foc_finite(U_alpha) || !foc_finite(U_beta) ||
         !foc_finite(I_alpha) || !foc_finite(I_beta) ||
         !foc_finite(state.x1) || !foc_finite(state.x2) ||
         !foc_finite(state.lambda_est) || !(state.lambda_est > 0.0f) ||
+        !foc_finite(state.i_alpha_last) || !foc_finite(state.i_beta_last) ||
         !foc_finite(state.pll_angle) || !foc_finite(state.speed)) {
         VescObserverState cleared = {};
         state = cleared;
         return false;
     }
 
-    const float L_ia = config.inductance * I_alpha;
-    const float L_ib = config.inductance * I_beta;
-    const float flux_a = state.x1 - L_ia;
-    const float flux_b = state.x2 - L_ib;
-    // 与 VESC ORTEGA_LAMBDA_COMP 一致，直接使用物理磁链估计值计算完整误差。
-    float error = state.lambda_est * state.lambda_est
-        - flux_a * flux_a - flux_b * flux_b;
+    float L_ia = config.inductance * I_alpha;
+    float L_ib = config.inductance * I_beta;
     const float gamma_half = config.gain * 0.5f;
-    // 先用有符号误差更新 lambda_est，使其可增可减，再按标称磁链的 0.3~2.5 倍限幅。
-    state.lambda_est += 0.2f * gamma_half * state.lambda_est * -error * dt;
     const float lambda_min = config.flux_linkage * 0.3f;
     const float lambda_max = config.flux_linkage * 2.5f;
-    if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
-    if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
-    // 与 VESC 一致，仅磁链矢量的非线性校正项抑制正误差。
-    if (error > 0.0f) error = 0.0f;
-    state.x1 += (U_alpha - config.resistance * I_alpha
-        + gamma_half * flux_a * error) * dt;
-    state.x2 += (U_beta - config.resistance * I_beta
-        + gamma_half * flux_b * error) * dt;
+    if (config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP) {
+        /* LICENCE NOTE (from the original VESC/MESC implementation):
+         * This function deviates slightly from the BSD 3 clause licence.
+         * The work here is entirely original to the MESC FOC project, and not based
+         * on any appnotes, or borrowed from another project. This work is free to
+         * use, as granted in BSD 3 clause, with the exception that this note must
+         * be included in where this code is implemented/modified to use your
+         * variable names, structures containing variables or other minor
+         * rearrangements in place of the original names I have chosen, and credit
+         * to David Molony as the original author must be noted.
+         */
+        // 对齐本地 VESC 默认 MXLEMMING_LAMBDA_COMP：电压积分减去 L*delta_i。
+        state.x1 += (U_alpha - config.resistance * I_alpha) * dt
+            - config.inductance * (I_alpha - state.i_alpha_last);
+        state.x2 += (U_beta - config.resistance * I_beta) * dt
+            - config.inductance * (I_beta - state.i_beta_last);
+        const float error = state.lambda_est * state.lambda_est
+            - state.x1 * state.x1 - state.x2 * state.x2;
+        state.lambda_est += 0.1f * gamma_half * state.lambda_est * -error * dt;
+        if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
+        if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
+        if (state.x1 > state.lambda_est) state.x1 = state.lambda_est;
+        if (state.x1 < -state.lambda_est) state.x1 = -state.lambda_est;
+        if (state.x2 > state.lambda_est) state.x2 = state.lambda_est;
+        if (state.x2 < -state.lambda_est) state.x2 = -state.lambda_est;
+        // 此分支的 x1/x2 已是永磁磁链，统一求角度时不能再次减去 L*i。
+        L_ia = L_ib = 0.0f;
+    } else {
+        const float flux_a = state.x1 - L_ia;
+        const float flux_b = state.x2 - L_ib;
+        // 与 VESC ORTEGA_LAMBDA_COMP 一致，直接使用物理磁链估计值计算完整误差。
+        float error = state.lambda_est * state.lambda_est
+            - flux_a * flux_a - flux_b * flux_b;
+        // 先用有符号误差更新 lambda_est，使其可增可减，再按标称磁链的 0.3~2.5 倍限幅。
+        state.lambda_est += 0.2f * gamma_half * state.lambda_est * -error * dt;
+        if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
+        if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
+        // 与 VESC 一致，仅磁链矢量的非线性校正项抑制正误差。
+        if (error > 0.0f) error = 0.0f;
+        state.x1 += (U_alpha - config.resistance * I_alpha
+            + gamma_half * flux_a * error) * dt;
+        state.x2 += (U_beta - config.resistance * I_beta
+            + gamma_half * flux_b * error) * dt;
+    }
+    state.i_alpha_last = I_alpha;
+    state.i_beta_last = I_beta;
 
     const float stator_magnitude = foc_sqrt(state.x1 * state.x1 + state.x2 * state.x2);
     // 与 VESC 一致，磁链矢量过小时按标称磁链的 0.5 倍阈值进行恢复。
