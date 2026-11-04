@@ -101,7 +101,7 @@ void Foc_motor::updateSvpwm(uint32_t &tA, uint32_t &tB, uint32_t &tC)
 /*
  * Copyright 2016 - 2022 Benjamin Vedder <benjamin@vedder.se>
  * Adapted from bldc-master/motor/foc_math.c:
- * FOC_OBSERVER_ORTEGA_ORIGINAL and foc_pll_run, plus fast sine/cosine/atan2
+ * FOC_OBSERVER_ORTEGA_LAMBDA_COMP and foc_pll_run, plus fast sine/cosine/atan2
  * from bldc-master/util/utils_math.c (same copyright and GPL-3.0-or-later).
  *
  * This part is free software: you can redistribute it and/or modify it under
@@ -165,12 +165,15 @@ void vesc_observer_reset(const VescObserverConfig &config,
         state.x1 = config.flux_linkage * cs;
         state.x2 = config.flux_linkage * sn;
         state.flux_magnitude = config.flux_linkage;
+        // 每次启动/重试都从标称磁链开始，不能沿用上次停机前的自适应结果。
+        state.lambda_est = config.flux_linkage;
+        state.lambda_ratio = 1.0f;
     }
 }
 
 bool vesc_observer_update(const VescObserverConfig &config,
                           VescObserverState &state, float U_alpha, float U_beta,
-                          float I_alpha, float I_beta, float dt, bool config_validated)
+                          float I_alpha, float I_beta, float dt, bool config_validated, bool adapt_flux)
 {
     if (!foc_finite(dt) || dt <= 0.0f || dt > 0.001f ||
         (!config_validated && (!foc_finite(config.resistance) || config.resistance <= 0.0f ||
@@ -183,6 +186,8 @@ bool vesc_observer_update(const VescObserverConfig &config,
         !foc_finite(U_alpha) || !foc_finite(U_beta) ||
         !foc_finite(I_alpha) || !foc_finite(I_beta) ||
         !foc_finite(state.x1) || !foc_finite(state.x2) ||
+        !foc_finite(state.lambda_est) || !foc_finite(state.lambda_ratio) ||
+        !(state.lambda_ratio > 0.0f) ||
         !foc_finite(state.pll_angle) || !foc_finite(state.speed)) {
         VescObserverState cleared = {};
         state = cleared;
@@ -193,18 +198,31 @@ bool vesc_observer_update(const VescObserverConfig &config,
     const float L_ib = config.inductance * I_beta;
     const float flux_a = state.x1 - L_ia;
     const float flux_b = state.x2 - L_ib;
-    float error = config.flux_linkage * config.flux_linkage
+    // 使用当前滤波尺度下的自适应磁链作为 Ortega 收敛半径。
+    // 标称磁链可能因转速相关的滤波补偿而变化，保留比例可避免产生虚假的磁链自适应。
+    state.lambda_est = config.flux_linkage * state.lambda_ratio;
+    float error = state.lambda_est * state.lambda_est
         - flux_a * flux_a - flux_b * flux_b;
-    // VESC Ortega correction: positive error is deliberately suppressed.
-    if (error > 0.0f) error = 0.0f;
     const float gamma_half = config.gain * 0.5f;
+    // VESC ORTEGA_LAMBDA_COMP：lambda += -0.2 * gamma_half * lambda * error * dt。
+    // 除以本次更新中固定的标称磁链，得到等价的比例更新，避免额外的浮点除法。
+    // 此处必须使用带符号的完整误差，才能使磁链估计既能增大也能减小。
+    if (adapt_flux) {
+        state.lambda_ratio -= 0.2f * gamma_half * state.lambda_ratio * error * dt;
+        if (state.lambda_ratio < 0.3f) state.lambda_ratio = 0.3f;
+        if (state.lambda_ratio > 2.5f) state.lambda_ratio = 2.5f;
+    }
+    state.lambda_est = config.flux_linkage * state.lambda_ratio;
+    // 与 VESC 一致，仅磁链矢量的非线性校正项抑制正误差。
+    if (error > 0.0f) error = 0.0f;
     state.x1 += (U_alpha - config.resistance * I_alpha
         + gamma_half * flux_a * error) * dt;
     state.x2 += (U_beta - config.resistance * I_beta
         + gamma_half * flux_b * error) * dt;
 
     const float stator_magnitude = foc_sqrt(state.x1 * state.x1 + state.x2 * state.x2);
-    if (stator_magnitude < config.flux_linkage * 0.5f) {
+    // 防塌陷阈值跟随自适应磁链，避免有效的小磁链被按标称值反复放大。
+    if (stator_magnitude < state.lambda_est * 0.5f) {
         state.x1 *= 1.1f;
         state.x2 *= 1.1f;
     }
@@ -219,12 +237,14 @@ bool vesc_observer_update(const VescObserverConfig &config,
     const float filter = dt / (0.02f + dt);
     state.phase_error += filter * (foc_abs(delta) - state.phase_error);
     if (!foc_finite(state.flux_magnitude) || !foc_finite(state.speed) ||
+        !foc_finite(state.lambda_est) || !foc_finite(state.lambda_ratio) ||
         !foc_finite(state.x1) || !foc_finite(state.x2)) {
         VescObserverState cleared = {};
         state = cleared;
         return false;
     }
-    const float ratio = state.flux_magnitude / config.flux_linkage;
+    // 锁定质量应相对于自适应半径判断，允许实际磁链偏离配置的标称值。
+    const float ratio = state.flux_magnitude / state.lambda_est;
     state.ready = ratio > 0.7f && ratio < 1.3f
         && foc_abs(state.speed) >= config.minimum_speed
         && state.phase_error < 0.25f;

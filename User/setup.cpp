@@ -912,10 +912,9 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
         filtered_U_beta += filter * (applied_beta - filtered_U_beta);
         filtered_I_alpha += filter * (I_alpha - filtered_I_alpha);
         filtered_I_beta += filter * (I_beta - filtered_I_beta);
-        // Matched filtering also attenuates the rotating PM flux. The Ortega
-        // radius must match that filtered flux, otherwise its one-sided
-        // correction leaves a DC flux offset as electrical speed increases.
-        // Use the discrete one-pole response, including its phase lag.
+        // 电压/电流的匹配低通也会衰减旋转磁链，按离散一阶滤波响应补偿标称磁链及相位。
+        // LAMBDA_COMP 在内部保留自适应磁链与标称值的比例，转速改变时不会重置该比例。
+        // 物理尺度下的在线磁链估计为 motor_flux * observer.lambda_ratio；不覆盖辨识值 motor_flux。
         float filter_sn, filter_cs;
         foc_fast_sincos(observer.speed * sample_dt, filter_sn, filter_cs);
         const float retained = 1.0f - filter;
@@ -925,8 +924,11 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
             foc_sqrt(filter_real * filter_real + filter_imag * filter_imag);
         observer_config.gain = 500.0f /
             (observer_config.flux_linkage * observer_config.flux_linkage);
+        // 开环启动先按标称磁链收敛；确认锁定并进入交接后，再在线跟踪磁链变化。
+        // 防止低速反电势过小、初始积分偏置或采样噪声使自适应磁链提前漂移。
+        const bool adapt_flux = motor_state == BLEND || motor_state == RUN;
         if (!vesc_observer_update(observer_config, observer, filtered_U_alpha, filtered_U_beta,
-                                  filtered_I_alpha, filtered_I_beta, sample_dt, true)) motor_fail(NUMERIC_ERROR);
+                                  filtered_I_alpha, filtered_I_beta, sample_dt, true, adapt_flux)) motor_fail(NUMERIC_ERROR);
         observer_phase = vesc_observer_wrap(observer.angle +
             foc_fast_atan2(filter_imag, filter_real));
 #if defined(STM32G431xx)
