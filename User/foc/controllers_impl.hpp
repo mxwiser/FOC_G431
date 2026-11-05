@@ -1,0 +1,89 @@
+#pragma once
+// Private implementation, included only by foc/motor_control_impl.hpp.
+
+void configure_controllers()
+{
+    PID cleared = {};
+    pi_d = pi_q = cleared;
+    pi_speed = cleared;
+    pi_speed.dt = sample_dt;
+    pi_speed.kp = cfg::speed_kp;
+    pi_speed.ki = cfg::speed_ki;
+    pi_speed.output_limit = speed_current_limit;
+    pi_d.dt = pi_q.dt = sample_dt;
+    const float bandwidth = detecting ? cfg::current_bandwidth : cfg::run_current_bandwidth;
+    pi_d.kp = pi_q.kp = motor_inductance * bandwidth;
+    pi_d.ki = pi_q.ki = motor_resistance * bandwidth;
+    observer_config.resistance = motor_resistance;
+    observer_config.inductance = motor_inductance;
+    observer_config.flux_linkage = motor_flux;
+    // VESC detection uses gamma = 500 / lambda^2.
+    observer_gain_base = motor_flux > 0.0f ? 500.0f / (motor_flux * motor_flux) : 0.0f;
+    observer_config.gain = observer_gain_base * cfg::observer_gain_slow * 4.0f;
+    observer_config.pll_kp = 1000.0f;
+    observer_config.pll_ki = 250000.0f;
+    observer_config.minimum_speed = cfg::minimum_rad_s;
+    observer_config.type = motor_observer_type();
+    vesc_observer_reset(observer_config, observer, 0.0f);
+    observer_phase = 0.0f;
+    VescStartupState cleared_startup = {};
+    startup = cleared_startup;
+    startup_elapsed = startup_iq_filtered = 0.0f;
+    startup_config.openloop_speed = cfg::startup_openloop_rad_s;
+    startup_config.openloop_low = cfg::startup_openloop_low;
+    startup_config.hysteresis_seconds = cfg::startup_hysteresis_seconds;
+    startup_config.lock_seconds = cfg::startup_lock_seconds;
+    startup_config.ramp_seconds = cfg::startup_ramp_seconds;
+    startup_config.hold_seconds = cfg::startup_hold_seconds;
+    startup_config.flux_linkage = motor_flux;
+    speed_reference = speed_feedback = speed_elapsed = 0.0f;
+}
+
+void update_iq_voltage_limit()
+{
+    const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
+    const float emf = foc_abs(observer.speed) * motor_flux;
+    const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
+    float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
+    if (fraction < 0.0f) fraction = 0.0f;
+    iq_voltage_limit = fraction * cfg::iq_voltage_derate_scale;
+    if (iq_voltage_limit > cfg::max_iq) iq_voltage_limit = cfg::max_iq;
+}
+
+float speed_control_reference()
+{
+    const float filter = sample_dt / (cfg::speed_filter_seconds + sample_dt);
+    speed_feedback += filter * (cfg::direction * motor_speed() - speed_feedback);
+    speed_elapsed += sample_dt;
+    const float limit = speed_current_limit < iq_voltage_limit ? speed_current_limit : iq_voltage_limit;
+    if (speed_elapsed >= cfg::speed_loop_seconds) {
+        const float elapsed = speed_elapsed;
+        speed_elapsed = 0.0f;
+        const float rpm_to_electrical = 2.0f * kPi * FOC_POLE_PAIRS / 60.0f;
+        // Use the slower end of the move, so a step to or from low speed
+        // cannot bypass the low-speed ramp limit.
+        const float reference_rpm = speed_reference / rpm_to_electrical;
+        const float ramp_speed_rpm = reference_rpm < speed_setpoint ? reference_rpm : speed_setpoint;
+        const float ramp_fraction = clamp((ramp_speed_rpm - cfg::speed_ramp_fast_start_rpm) /
+            (cfg::speed_ramp_fast_full_rpm - cfg::speed_ramp_fast_start_rpm), 1.0f);
+        const float ramp = cfg::speed_ramp_rpm_per_second +
+            (cfg::speed_ramp_fast_rpm_per_second - cfg::speed_ramp_rpm_per_second) *
+            (ramp_fraction > 0.0f ? ramp_fraction : 0.0f);
+        speed_reference += clamp(speed_setpoint * rpm_to_electrical - speed_reference,
+            ramp * rpm_to_electrical * elapsed);
+        pi_speed.dt = elapsed;
+        pi_speed.output_limit = limit;
+        pi_speed.input = speed_reference - speed_feedback;
+        calculate_PI(&pi_speed);
+        // Forward torque only: deceleration coasts, avoiding regenerative bus rise.
+        if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
+        if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
+    }
+    // The current loop remains at the ADC rate. Clamp rapidly if headroom shrinks.
+    float reference = cfg::direction * iq_reference;
+    const float target = pi_speed.output < limit ? pi_speed.output : limit;
+    reference += clamp(target-reference,cfg::speed_iq_slew_per_second * sample_dt);
+    if (reference > limit) reference = limit;
+    if (reference < 0.0f) reference = 0.0f;
+    return cfg::direction * reference;
+}

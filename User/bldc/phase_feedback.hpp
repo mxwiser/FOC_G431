@@ -1,12 +1,11 @@
 #pragma once
 #include <stdint.h>
 
-// Board integration point, intentionally not connected to a fabricated signal.
-// Call from the ADC path that captures all three phase voltages, once per PWM
-// sample. Values are phase-to-ground volts after divider/offset calibration.
+// Called by foc/adc_control_impl.hpp after decoding the current 3-rank DMA frame.
+// U=ADC2 rank3, V=ADC2 rank2, W=ADC1 rank3; divider factor is 16.
+// Values are physical phase-to-ground volts, not PWM voltage reconstruction.
 // The publisher stamps the main current-ADC frame counter internally.
 // Publish before that frame's BLDC control update; >2 frames old stops BLDC.
-// The present CubeMX configuration has no phase-voltage ADC channels.
 #ifdef __cplusplus
 extern "C" {
 #endif

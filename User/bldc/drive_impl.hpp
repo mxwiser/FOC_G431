@@ -1,5 +1,5 @@
-// Included only by setup.cpp inside its private namespace.
-// Shared protection and speed PI live in setup.cpp; all six-step work is here.
+// Included only by foc/motor_control_impl.hpp inside its private namespace.
+// Shared protection and speed PI live in foc/state_machine_impl.hpp; all six-step work is here.
 void bldc_drive_sample()
 {
     if (!bldc_feedback_ready()) { motor_fail(BLDC_FEEDBACK_ERROR); return; }

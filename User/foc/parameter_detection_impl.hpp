@@ -1,4 +1,4 @@
-// Included only by setup.cpp inside its private namespace.
+// Included only by foc/motor_control_impl.hpp inside its private namespace.
 // FOC R/L/flux identification. BLDC never enters this identification flow.
 
 void update_resistance()

@@ -1,4 +1,4 @@
-// Included only by setup.cpp inside its private namespace.
+// Included only by foc/motor_control_impl.hpp inside its private namespace.
 // FOC voltage/current loops and sensorless startup; both FOC observers use this path.
 
 // SI volts -> VESC modulation -> timer ticks. Save quantized voltage / Udc.

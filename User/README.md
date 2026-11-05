@@ -11,21 +11,31 @@
 
 ## 目录分工
 
-- `setup.cpp`：ADC、串口、状态机、共同保护、速度 PI 和模式分派。
+- `setup.cpp`：仅启动调用和 ADC HAL 回调转发，共 18 行。
 - `motor_mode.hpp`：稳定的模式编号。
+- `foc/motor_control.hpp`：控制模块对外入口；`motor_control_impl.hpp` 组织初始化和前台循环。
+- `foc/motor_state.hpp`：控制状态与固定存储；`state_machine_impl.hpp` 管理启停、保护和模式分派。
+- `foc/controllers_impl.hpp`：控制器初始化、速度环及电压裕量限流。
+- `foc/adc_sampling.hpp`：ADC rank、DMA 下标和电压换算；`adc_control_impl.hpp` 处理每帧采样与控制。
 - `foc/drive_impl.hpp`：FOC 电流环、SVPWM 输出和无感启动。
 - `foc/parameter_detection_impl.hpp`：FOC 的 R/L/磁链辨识。
 - `foc/foc_math.cpp`：坐标变换、观测器共同校验和 PLL，分派到两种独立观测器。
+- `foc/diagnostics_impl.hpp`：可选的电流环诊断记录。
+- `app/serial_command.hpp`：上位机命令格式解析。
+- `app/communication_state.hpp`：串口 RX、状态和高速遥测的固定缓冲区。
+- `app/host_protocol_impl.hpp`：命令执行、确认、OBS 状态和 CUR 高速电流协议。
+- `app/uart_irq_impl.hpp`：UART 接收、DMA idle 事件和错误回调。
 - `bldc/bldc.hpp`：无硬件依赖的六步表、反电动势换相、启动和线电流 PI。
 - `bldc/drive_impl.hpp`：BLDC 控制与共同状态机之间的连接。
 - `bldc/timer_output.hpp`：G431 三个桥臂的 PWM/强制低电平/悬空输出及 FOC 恢复。
 - `bldc/phase_feedback.hpp`：板级 U/V/W 相电压采样接口。
 
-`*_impl.hpp` 只由 `setup.cpp` 在私有命名空间中包含，不单独加入 Keil 编译组。
+控制模块实现仅由现有 `setup.cpp` 编译单元包含一次，内部再按上述职责组织私有实现，
+不单独把 `*_impl.hpp` 加入 Keil 编译组。
 新增观测器分支也从原有 `foc_math.cpp` 编译，不需要更改 CubeMX 或工程文件列表。
 嵌入式全部使用固定存储，无动态分配、虚函数或 C++ 容器。
 
-## BLDC 移植范围与当前硬件缺口
+## ADC 数据排列与 BLDC 接入
 
 参考本地 `bldc-master/motor/mcpwm.c` 的六步输出表和 `COMM_MODE_DELAY`：
 换相后消隐，检测悬空相反电动势过零，延时约 30 电角度后换相。
@@ -35,27 +45,28 @@
 此次没有移植 VESC 的积分换相、霍尔/混合模式及全部参数检测流程。
 来源许可见 `foc/VESC_LICENSE.txt`（GPL-3.0-or-later）。
 
-**当前 `.ioc` 只采集三相电流和母线电压，尚无 U/V/W 相电压采样。**
-因此可以切换选择 BLDC，但启动会返回 `cmd=6`，不会给电机施加六步驱动。
-BLDC 的 `D` 参数辨识指令返回 `cmd=7`；需要辨识时先切回 FOC。
+按用户更新的 CubeMX 配置，保持**两相电流、三相电压**，双 ADC 均为 3 ranks：
 
-接通 BLDC 闭环前，需要先确定硬件上的 U/V/W ADC 引脚、分压比与零偏，
-由用户在 CubeMX 中配置相电压采样。保留现有双 ADC 电流 DMA 的顺序和长度；
-额外电压采样的 ADC 序列/触发资源需根据实际引脚确定。
-相电压应在 PWM 有效导通平台采集，避开开关沿、死区和换相消隐区。
-现有 CH4 的电流采样点位于 PWM 峰值附近，不能直接当作相电压的有效采样点。
+| Rank | ADC1 / DMA 低 16 位 | ADC2 / DMA 高 16 位 |
+| --- | --- | --- |
+| 1 | OPAMP1 / Ia，索引 0 | OPAMP2 / Ib，索引 1 |
+| 2 | IN1 / 母线，索引 2 | IN5 / V 相（PC4），索引 3 |
+| 3 | IN14 / W 相（PB11），索引 4 | IN17 / U 相（PA4），索引 5 |
 
-板级采样回调在完成一次新的 U/V/W 采样并换算为对地电压（V）后调用：
+DMA 缓冲区为 6 个 `uint16_t`，启动长度为 **3 个 32 位 DMA 字**。
+只校准 A/B 两路电流零点，C 相由同一帧 `Ic = -Ia - Ib` 重建。
+FOC 保持用同步 A/B 电流做两相 Clarke；重建的 C 相用于遥测和过流保护。
+索引 3 是 V 相电压，不能再当作原来的 C 相电流 ADC。
 
-```cpp
-#include "bldc/phase_feedback.hpp"
-bldc_publish_phase_voltages(voltage_u, voltage_v, voltage_w);
-```
+三相电压按板上 33 kΩ / 2.2 kΩ 分压（16 倍）换算为对地电压，
+每次完整 ADC DMA 回调均按 U/V/W 顺序发布给 BLDC，待机时也更新，
+因此收到有效采样后 `bfb=1`，可通过原有 BLDC 启动反馈检查。
 
-必须发布真实的新 ADC 结果，不能从占空比重建电压，也不能重复发布旧缓冲区。
-发布函数内部记录当前电流 ADC 帧号；超过两帧未更新或输入无效，BLDC 停机并
-锁存 `f=13`。接入采样后仍需实机验证相序、采样窗口、启动及换相参数。
-本次没有修改 `.ioc`、`Core`、`Drivers` 或 Keil 工程，也没有烧录/启动真实电机。
+BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
+相电压输入无效或停止发布时保留 `cmd=6` / `f=13` 的反馈保护。
+本次按现有配置解析采样，保留用户的 ADC/PWM 触发时序，没有修改 `.ioc`、`Core`、
+`Drivers` 或 Keil 工程。BLDC 的实际相序、PWM 采样窗口和换相仍需实机验证，
+主机信号测试不代表已经完成带载调试；本次没有烧录或启动真实电机。
 
 ## 串口与上位机
 
@@ -74,6 +85,8 @@ bldc_publish_phase_voltages(voltage_u, voltage_v, voltage_w);
 
 ```text
 python matlab/tests/test_motor_modes.py
+python matlab/tests/test_adc_rank_sync.py
+python matlab/tests/test_clark_two_phase.py
 python matlab/tests/test_startup_regression.py
 python matlab/tests/test_adaptive_flux.py
 python matlab/build_sensorless.py --output matlab/firmware_bldc_modes
