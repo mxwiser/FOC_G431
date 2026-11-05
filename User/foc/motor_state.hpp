@@ -8,15 +8,12 @@ VescObserverType motor_observer_type() {
         : VESC_OBSERVER_ORTEGA_LAMBDA_COMP;
 }
 const float kPi = 3.14159265358979323846f;
-const float kAmpsPerCount = 0.02946541f;
-const uint32_t kZeroSamples = 2048u;
 enum MotorState { ZERO, IDLE, BOOTSTRAP, DETECT_R, DETECT_L,
     ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND /* 旧协议保留值，正常启动不再经过此状态 */, RUN, FAULT, RETRY_WAIT };
 enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
     BAD_BUS, BAD_CONFIG, ALIGN_FAILED, STARTUP_TIMEOUT,
     LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR, BLDC_FEEDBACK_ERROR };
 
-__align(4) uint16_t adc_buffer[motor_adc::sample_count];
 volatile MotorState motor_state = ZERO;
 volatile MotorFault motor_fault = NO_FAULT;
 volatile uint32_t sample_frames = 0;
@@ -24,8 +21,6 @@ volatile uint32_t isr_max_cycles = 0;
 volatile uint32_t observer_max_cycles = 0, current_max_cycles = 0, pwm_max_cycles = 0;
 volatile uint32_t pwm_write_max_cycles = 0;
 uint32_t isr_start_cycle;
-uint32_t zero_count = 0, zero_sum[2] = {};
-float zero_a, zero_b;
 float I_a, I_b, I_c, I_alpha, I_beta, I_d, I_q;
 float Udc_quant, electrical_angle, openloop_angle, openloop_speed;
 float sample_dt, state_time, stable_time, lost_time;
@@ -88,3 +83,12 @@ float first_inductance, first_flux, emf_d, emf_q, emf_abs;
 float filtered_emf_a, filtered_emf_b;
 float detect_phase;
 uint32_t detect_samples;
+
+// Transport-independent, coherent SI input frame. The board adapter owns raw ADC.
+struct ControlInputFrame {
+    float ia, ib, vu, vv, vw, bus;
+    uint8_t supplied;
+};
+ControlInputFrame input_frame = {};
+float encoder_electrical_angle = 0.0f;
+bool encoder_angle_available = false;

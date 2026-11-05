@@ -12,6 +12,7 @@
 #include "vesc_startup.hpp"
 #include "adc_sampling.hpp"
 #include "../app/serial_command.hpp"
+#include "../app/data_port.hpp"
 #include "../motor_mode.hpp"
 #include "../bldc/bldc.hpp"
 #include "../bldc/phase_feedback.hpp"
@@ -24,16 +25,19 @@
 
 
 namespace {
+#include "../board/adc_state.hpp"
 #include "motor_state.hpp"
 #include "../app/communication_state.hpp"
 #include "state_machine_impl.hpp"
+#include "../board/uart_port_impl.hpp"
 #include "../app/host_protocol_impl.hpp"
 #include "diagnostics_impl.hpp"
 } // namespace
 
 #include "../bldc/phase_feedback_impl.hpp"
 #include "adc_control_impl.hpp"
-#include "../app/uart_irq_impl.hpp"
+#include "../board/adc_port_impl.hpp"
+#include "../board/uart_irq_impl.hpp"
 
 void motor_control::run()
 {
@@ -47,7 +51,7 @@ void motor_control::run()
     // No TIM4 reads or encoder startup. Ignore an unplugged Z input.
     CLEAR_BIT(EXTI->IMR1, ENCODE_ZERO_Pin); __HAL_GPIO_EXTI_CLEAR_IT(ENCODE_ZERO_Pin);
     bridge_off();
-    if (start_uart_receive() != HAL_OK) uart_rx_error = true;
+    if (start_uart_receive() != HAL_OK) data_port::receive_error();
     RCC_ClkInitTypeDef clocks = {}; uint32_t latency = 0;
     HAL_RCC_GetClockConfig(&clocks, &latency);
     const float timer_clock = static_cast<float>(HAL_RCC_GetPCLK2Freq())

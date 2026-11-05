@@ -4,14 +4,6 @@
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX,
     COMMAND_FEEDBACK, COMMAND_UNSUPPORTED };
 CommandResult command_result = COMMAND_NONE;
-uint8_t uart_rx_byte;
-volatile uint8_t uart_rx_data[256];
-volatile uint8_t uart_rx_write = 0, uart_rx_read = 0;
-volatile bool uart_rx_overflow = false, uart_rx_error = false;
-// UART and RX DMA IRQs must use the same preemption priority.  Both invoke
-// the receive-to-idle callback and therefore share this DMA cursor.
-volatile uint8_t uart_rx_dma_data[128];
-uint16_t uart_rx_dma_read = 0;
 SerialCommandParser command_parser = {};
 // Telemetry selection only; ADC sampling remains active for FOC and protection.
 volatile uint8_t phase_telemetry_mask = 0u;

@@ -21,21 +21,21 @@ void capture_phase_sample()
     sample.a = (selected & 1u) ? phase_milliamps(I_a) : 0;
     sample.b = (selected & 2u) ? phase_milliamps(I_b) : 0;
     sample.c = (selected & 4u) ? phase_milliamps(I_c) : 0;
-    __DMB();
+    data_port::memory_barrier();
     phase_write = next;
 }
 void service_command(uint8_t command)
 {
     if (command == 's' || command == 'S') {
-        const uint32_t mask = __get_PRIMASK(); __disable_irq();
+        const uint32_t mask = data_port::enter_critical();
         run_requested = false;
         restart_reason = NO_FAULT;
         bridge_off();
         // Stop does not clear latched faults. Reset is required for that.
         if (motor_fault == NO_FAULT && motor_state != ZERO) {
-            coast_until = HAL_GetTick() + 2000u; enter_state(IDLE);
+            coast_until = data_port::milliseconds() + 2000u; enter_state(IDLE);
         }
-        __set_PRIMASK(mask);
+        data_port::leave_critical(mask);
         command_result = COMMAND_OK;
     } else if (command == 'd' || command == 'D' || command == 'r' || command == 'R') {
         if (motor_mode == MOTOR_BLDC && (command == 'd' || command == 'D')) {
@@ -52,41 +52,31 @@ void service_command(uint8_t command)
     }
 }
 
-HAL_StatusTypeDef start_uart_receive()
-{
-    if (huart2.hdmarx) {
-        if (huart2.hdmarx->Init.Mode != DMA_CIRCULAR) return HAL_ERROR;
-        uart_rx_dma_read = 0;
-        return HAL_UARTEx_ReceiveToIdle_DMA(&huart2, const_cast<uint8_t *>(uart_rx_dma_data), sizeof(uart_rx_dma_data));
-    }
-    return HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
-}
-
 void service_serial()
 {
+    data_port::ReceiveState &rx = data_port::receive_state();
 recover_uart:
-    if (uart_rx_overflow || uart_rx_error) {
-        const uint32_t mask = __get_PRIMASK(); __disable_irq();
-        uart_rx_read = uart_rx_write;
-        uart_rx_overflow = uart_rx_error = false;
+    if (rx.overflow || rx.error) {
+        const uint32_t mask = data_port::enter_critical();
+        rx.read = rx.write;
+        rx.overflow = rx.error = false;
         command_parser.length = 0;
         command_parser.discarding = true;
-        __set_PRIMASK(mask);
+        data_port::leave_critical(mask);
         service_command('S');
         command_result = COMMAND_RX;
-        HAL_UART_AbortReceive(&huart2);
-        uart_rx_read = uart_rx_write;
-        if (start_uart_receive() != HAL_OK) { uart_rx_error = true; return; }
+        rx.read = rx.write;
+        if (!data_port::recover_receive()) { rx.error = true; return; }
     }
-    while (!uart_rx_overflow && !uart_rx_error && uart_rx_read != uart_rx_write) {
-        const uint8_t byte = uart_rx_data[uart_rx_read];
-        uart_rx_read = static_cast<uint8_t>(uart_rx_read + 1u);
+    while (!rx.overflow && !rx.error && rx.read != rx.write) {
+        const uint8_t byte = rx.data[rx.read];
+        rx.read = static_cast<uint8_t>(rx.read + 1u);
         SerialCommand command;
         if (!serial_command_feed(command_parser, byte, command)) continue;
         // Do not execute an already-queued command after an RX fault.  ADC
         // remains protected by the short bounded command critical section.
-        const uint32_t command_mask = __get_PRIMASK(); __disable_irq();
-        if (uart_rx_overflow || uart_rx_error) { __set_PRIMASK(command_mask); break; }
+        const uint32_t command_mask = data_port::enter_critical();
+        if (rx.overflow || rx.error) { data_port::leave_critical(command_mask); break; }
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
@@ -110,10 +100,10 @@ recover_uart:
             if (foc_finite(command.value) && command.value >= 0.0f && command.value <= 7.0f) {
                 const uint8_t phases = static_cast<uint8_t>(command.value);
                 if (command.value == static_cast<float>(phases) && phases != phase_telemetry_mask) {
-                    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+                    const uint32_t mask = data_port::enter_critical();
                     phase_read = phase_write; // discard samples from the previous selection
                     phase_telemetry_mask = phases;
-                    __set_PRIMASK(mask);
+                    data_port::leave_critical(mask);
                 }
             }
         }
@@ -129,7 +119,7 @@ recover_uart:
             } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
                 command_result = COMMAND_BUSY;
             } else {
-                const uint32_t mask = __get_PRIMASK(); __disable_irq();
+                const uint32_t mask = data_port::enter_critical();
                 if (limit) speed_current_limit = command.value;
                 else if (speed) {
                     speed_setpoint = command.value;
@@ -145,20 +135,20 @@ recover_uart:
                     current_mode = true;
                     if (iq_setpoint == 0.0f) service_command('S');
                 }
-                __set_PRIMASK(mask);
+                data_port::leave_critical(mask);
                 command_result = COMMAND_OK;
             }
         } else command_result = COMMAND_FORMAT;
-        __set_PRIMASK(command_mask);
+        data_port::leave_critical(command_mask);
     }
-    if (uart_rx_overflow || uart_rx_error) goto recover_uart;
+    if (rx.overflow || rx.error) goto recover_uart;
 }
 
 bool send_status()
 {
-    if (huart2.gState != HAL_UART_STATE_READY) return false;
+    if (!data_port::tx_ready()) return false;
     static char text[448]; // Persistent until the interrupt-driven TX completes.
-    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    const uint32_t mask = data_port::enter_critical();
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
     const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
     const float bus = Udc_quant, id = inactive ? 0.0f : I_d, iq = inactive ? 0.0f : I_q;
@@ -191,7 +181,7 @@ bool send_status()
     const float reference_rpm = inactive || current_mode ? 0.0f :
         cfg::direction * speed_reference * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS);
     const float speed_limit = speed_current_limit;
-    __set_PRIMASK(mask);
+    data_port::leave_critical(mask);
     int length = snprintf(text, sizeof(text),
         "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u,ol=%d,obs=%c,drv=%u,bfb=%d",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
@@ -213,7 +203,7 @@ bool send_status()
     }
     if (length + 2 >= static_cast<int>(sizeof(text))) return false;
     text[length++] = '\r'; text[length++] = '\n';
-    return HAL_UART_Transmit_DMA(&huart2, reinterpret_cast<uint8_t *>(text), static_cast<uint16_t>(length)) == HAL_OK;
+    return data_port::write(reinterpret_cast<const uint8_t *>(text), static_cast<uint16_t>(length));
 }
 
 // Append a signed decimal field to a bounded, fixed-size packet.
@@ -230,7 +220,7 @@ void append_phase_number(char *text, unsigned &length, int32_t number)
 
 void send_phase_samples()
 {
-    if (huart2.gState != HAL_UART_STATE_READY) return;
+    if (!data_port::tx_ready()) return;
     const uint8_t selected = phase_telemetry_mask;
     uint8_t read = phase_read;
     const uint8_t available = (phase_write - read) & 127u;
@@ -256,6 +246,6 @@ void send_phase_samples()
         read = (read + 1u) & 127u;
     }
     text[length++] = '\r'; text[length++] = '\n';
-    if (HAL_UART_Transmit_DMA(&huart2, reinterpret_cast<uint8_t *>(text),
-                              static_cast<uint16_t>(length)) == HAL_OK) phase_read = read;
+    if (data_port::write(reinterpret_cast<const uint8_t *>(text),
+                         static_cast<uint16_t>(length))) phase_read = read;
 }

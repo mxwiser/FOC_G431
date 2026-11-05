@@ -9,10 +9,10 @@ void setup(void)
 
 extern "C" void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    motor_control::adc_complete(hadc);
+    if (hadc == &hadc1) board_adc_complete();
 }
 
 extern "C" void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
 {
-    motor_control::adc_error(hadc);
+    if (hadc == &hadc1 || hadc == &hadc2) motor_control::adc_error();
 }

@@ -1,35 +1,21 @@
 #pragma once
 // Private implementation, included only by foc/motor_control_impl.hpp.
 
-static void adc_sample(ADC_HandleTypeDef *hadc)
+// All values here are supplied as physical SI quantities. No ADC/HAL handles.
+static void control_input_frame()
 {
-    if (hadc != &hadc1) return;
     ++sample_frames;
-    const volatile uint16_t *samples = adc_buffer;
-    // 两相电流、母线和三相电压；完整布局见 adc_sampling.hpp。
-    const uint16_t a = samples[motor_adc::CURRENT_A], b = samples[motor_adc::CURRENT_B];
-    const uint16_t bus = samples[motor_adc::BUS];
-    const uint16_t voltage_u = samples[motor_adc::VOLTAGE_U];
-    const uint16_t voltage_v = samples[motor_adc::VOLTAGE_V];
-    const uint16_t voltage_w = samples[motor_adc::VOLTAGE_W];
-    Udc_quant = motor_adc::bus_volts(bus);
-    bldc_publish_phase_voltages(motor_adc::phase_volts(voltage_u),
-        motor_adc::phase_volts(voltage_v), motor_adc::phase_volts(voltage_w));
-    if (motor_state == FAULT) { bridge_off(); return; }
-    if (motor_state == ZERO) {
-        if (a < 256 || a > 3840 || b < 256 || b > 3840) {
-            motor_fail(BAD_ZERO); return;
-        }
-        zero_sum[0] += a; zero_sum[1] += b;
-        if (++zero_count == kZeroSamples) {
-            zero_a = static_cast<float>(zero_sum[0]) / kZeroSamples;
-            zero_b = static_cast<float>(zero_sum[1]) / kZeroSamples;
-            enter_state(IDLE);
-        }
-        return;
+    const ControlInputFrame frame = input_frame;
+    input_frame.supplied = 0u;
+    if (frame.supplied != 7u) { motor_fail(ADC_ERROR); return; }
+    if (!foc_finite(frame.ia) || !foc_finite(frame.ib) || !foc_finite(frame.bus)) {
+        motor_fail(NUMERIC_ERROR); return;
     }
-    I_a = (zero_a - a) * kAmpsPerCount; I_b = (zero_b - b) * kAmpsPerCount;
-    I_c = -I_a - I_b; // 同一时刻的两相电流重建 C 相，不再读取第三路电流 ADC。
+    Udc_quant = frame.bus;
+    bldc_publish_phase_voltages(frame.vu, frame.vv, frame.vw);
+    if (motor_state == FAULT) { bridge_off(); return; }
+    if (motor_state == ZERO) return;
+    I_a = frame.ia; I_b = frame.ib; I_c = -I_a - I_b;
     capture_phase_sample();
     last_I_alpha = I_alpha; last_I_beta = I_beta;
     // FOC 电流环和观测器保持使用同步 A/B 的两相 Clarke。
@@ -40,10 +26,9 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
 #endif
         return;
     }
-    if (a == 0 || a == 4095 || b == 0 || b == 4095 ||
-        foc_abs(I_a) > cfg::overcurrent || foc_abs(I_b) > cfg::overcurrent ||
+    if (foc_abs(I_a) > cfg::overcurrent || foc_abs(I_b) > cfg::overcurrent ||
         foc_abs(I_c) > cfg::overcurrent) { motor_fail(OVERCURRENT); return; }
-    if (bus == 4095 || Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return; }
+    if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return; }
     // Peak sampling / valley CCR preload: half of each of the two last commands.
     applied_alpha = Udc_quant * 0.5f * (prior_alpha + older_alpha);
     applied_beta = Udc_quant * 0.5f * (prior_beta + older_beta);
@@ -76,20 +61,36 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
 #endif
 }
 
-void motor_control::adc_complete(ADC_HandleTypeDef *hadc)
+void motor_control::set_phase_currents(float ia, float ib)
 {
-#if defined(STM32G431xx)
-    const uint32_t start = DWT->CYCCNT;
-    isr_start_cycle = start;
-#endif
-    adc_sample(hadc);
-#if defined(STM32G431xx)
-    const uint32_t cycles = DWT->CYCCNT - start;
-    if (cycles > isr_max_cycles) isr_max_cycles = cycles;
-#endif
+    input_frame.ia = ia; input_frame.ib = ib; input_frame.supplied |= 1u;
 }
 
-void motor_control::adc_error(ADC_HandleTypeDef *hadc)
+void motor_control::set_phase_voltages(float vu, float vv, float vw)
 {
-    if (hadc == &hadc1 || hadc == &hadc2) motor_fail(ADC_ERROR);
+    input_frame.vu = vu; input_frame.vv = vv; input_frame.vw = vw;
+    input_frame.supplied |= 2u;
+}
+
+void motor_control::set_bus_voltage(float volts)
+{
+    input_frame.bus = volts; input_frame.supplied |= 4u;
+}
+
+void motor_control::set_encoder_angle(float radians)
+{
+    encoder_angle_available = foc_finite(radians);
+    if (encoder_angle_available) encoder_electrical_angle = vesc_observer_wrap(radians);
+}
+
+void motor_control::adc_complete() { control_input_frame(); }
+void motor_control::adc_error() { motor_fail(ADC_ERROR); }
+bool motor_control::calibrating() { return motor_state == ZERO; }
+void motor_control::calibration_complete()
+{
+    if (motor_state == ZERO) enter_state(IDLE);
+}
+void motor_control::input_error(InputError error)
+{
+    motor_fail(error == BAD_CURRENT_ZERO ? BAD_ZERO : OVERCURRENT);
 }

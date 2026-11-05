@@ -52,8 +52,9 @@ inline void commutate(State &s, int direction, bool measured) {
     s.armed = s.crossed = false;
 }
 
-// voltage[] must be physical phase-to-ground volts captured at a valid PWM
-// sampling point. Fabricated phase voltages from duty cycles are not feedback.
+// voltage[] contains actual phase-to-ground samples. During PWM freewheel,
+// both driven legs are low and the ADC clips a floating phase below ground.
+// Detect both edges of that clamped signal; do not require a negative ADC value.
 inline bool update(const Config &c, State &s, const float voltage[3],
                    const float current[3], float bus, float reference, float dt) {
     if (!finite(bus) || bus <= 0.0f || !finite(dt) || dt <= 0.0f || dt > 0.001f ||
@@ -79,14 +80,32 @@ inline bool update(const Config &c, State &s, const float voltage[3],
     if (!aligning) {
         const float threshold = bus * 0.002f + 0.02f;
         const float emf = signed_bemf(s, voltage, c.direction);
+        const Step phase = step(s.sector);
+        const bool freewheel = voltage[phase.source] < bus * 0.1f &&
+                               voltage[phase.sink] < bus * 0.1f;
         const float blank = s.period * 0.1f > 2.0f * dt ? s.period * 0.1f : 2.0f * dt;
         if (s.sector_time > blank) {
-            if (emf < -threshold && !s.crossed) s.armed = true;
-            if (s.armed && emf > threshold && s.sector_time > s.period * 0.2f &&
-                s.sector_time < s.period * 0.85f) s.crossed = true;
+            bool after_crossing;
+            if (freewheel) {
+                const float floating = voltage[phase.floating] -
+                    0.5f * (voltage[phase.source] + voltage[phase.sink]);
+                const bool rising = phase.crossing_sign * c.direction > 0;
+                const bool before_crossing = rising ? floating <= threshold : floating > threshold;
+                after_crossing = rising ? floating > threshold : floating <= threshold;
+                if (before_crossing && !s.crossed) s.armed = true;
+            } else {
+                if (emf < -threshold && !s.crossed) s.armed = true;
+                after_crossing = emf > threshold;
+            }
+            // During takeover the rotor can already be past zero at the
+            // start of this vector. A clipped falling edge may have no
+            // observable pre-zero sample at all. Like VESC COMM_MODE_DELAY,
+            // qualify the sustained post-zero half-cycle after blanking;
+            // requiring an earlier edge traps startup in forced commutation.
+            if (after_crossing && s.sector_time > s.period * 0.2f) s.crossed = true;
             // VESC COMM_MODE_DELAY: positive BEMF for half of a 60-degree
             // period gives the 30-degree delay after the zero crossing.
-            if (s.crossed && emf > 0.0f) s.positive_time += dt;
+            if (s.crossed && (freewheel ? after_crossing : emf > 0.0f)) s.positive_time += dt;
             else if (s.crossed) { s.positive_time = 0.0f; s.crossed = false; }
         }
         if (s.crossed && s.positive_time >= 0.5f * s.period) commutate(s, c.direction, true);
@@ -104,8 +123,9 @@ inline bool update(const Config &c, State &s, const float voltage[3],
     const float error = reference - s.current;
     const float maximum = bus * c.max_duty;
     s.integral += 2.0f * c.resistance * 500.0f * error * dt;
-    const float feedforward = s.locked ? 1.7320508f * c.flux * std::fabs(s.speed) : 0.0f;
-    const float requested = 2.0f * c.inductance * 500.0f * error + s.integral + feedforward;
+    // The integral already supplies the steady back-EMF voltage. Adding a
+    // speed-derived term at lock duplicates it and feeds timing jitter into duty.
+    const float requested = 2.0f * c.inductance * 500.0f * error + s.integral;
     const float output = bound(requested, 0.0f, maximum);
     s.integral += output - requested;
     s.duty = s.failed ? 0.0f : output / bus;

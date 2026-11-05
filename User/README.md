@@ -11,20 +11,22 @@
 
 ## 目录分工
 
-- `setup.cpp`：仅启动调用和 ADC HAL 回调转发，共 18 行。
+- `setup.cpp`：启动调用和 ADC HAL 回调；在硬件边界判断句柄，控制模块不接收句柄。
 - `motor_mode.hpp`：稳定的模式编号。
 - `foc/motor_control.hpp`：控制模块对外入口；`motor_control_impl.hpp` 组织初始化和前台循环。
 - `foc/motor_state.hpp`：控制状态与固定存储；`state_machine_impl.hpp` 管理启停、保护和模式分派。
 - `foc/controllers_impl.hpp`：控制器初始化、速度环及电压裕量限流。
-- `foc/adc_sampling.hpp`：ADC rank、DMA 下标和电压换算；`adc_control_impl.hpp` 处理每帧采样与控制。
+- `foc/adc_sampling.hpp`：当前板的 ADC rank、DMA 下标和电压换算；`adc_control_impl.hpp` 只消费 SI 输入帧。
 - `foc/drive_impl.hpp`：FOC 电流环、SVPWM 输出和无感启动。
 - `foc/parameter_detection_impl.hpp`：FOC 的 R/L/磁链辨识。
 - `foc/foc_math.cpp`：坐标变换、观测器共同校验和 PLL，分派到两种独立观测器。
 - `foc/diagnostics_impl.hpp`：可选的电流环诊断记录。
 - `app/serial_command.hpp`：上位机命令格式解析。
-- `app/communication_state.hpp`：串口 RX、状态和高速遥测的固定缓冲区。
+- `app/data_port.hpp` / `app/data_port.cpp`：无 HAL 依赖的收发接口、固定 RX 队列和错误事件。
+- `app/communication_state.hpp`：协议状态和高速遥测的固定缓冲区。
 - `app/host_protocol_impl.hpp`：命令执行、确认、OBS 状态和 CUR 高速电流协议。
-- `app/uart_irq_impl.hpp`：UART 接收、DMA idle 事件和错误回调。
+- `board/adc_state.hpp` / `board/adc_port_impl.hpp`：ADC 缓冲、零点校准、原始值换算与输入接口调用。
+- `board/uart_port_impl.hpp` / `board/uart_irq_impl.hpp`：STM32 UART2、DMA 与 HAL 回调，绑定到 data_port。
 - `bldc/bldc.hpp`：无硬件依赖的六步表、反电动势换相、启动和线电流 PI。
 - `bldc/drive_impl.hpp`：BLDC 控制与共同状态机之间的连接。
 - `bldc/timer_output.hpp`：G431 三个桥臂的 PWM/强制低电平/悬空输出及 FOC 恢复。
@@ -34,6 +36,30 @@
 不单独把 `*_impl.hpp` 加入 Keil 编译组。
 新增观测器分支也从原有 `foc_math.cpp` 编译，不需要更改 CubeMX 或工程文件列表。
 嵌入式全部使用固定存储，无动态分配、虚函数或 C++ 容器。
+
+## 可移植的数据接口
+
+控制输入头文件 `foc/motor_control.hpp` 不包含 STM32/HAL 类型。每一帧使用：
+
+```cpp
+motor_control::set_phase_currents(ia, ib);        // 已校准电流，A；Ic=-Ia-Ib
+motor_control::set_phase_voltages(vu, vv, vw);    // 对地相电压，V
+motor_control::set_bus_voltage(vbus);            // 母线电压，V
+motor_control::adc_complete();                   // 提交完整一帧并执行控制，无句柄
+```
+
+驱动错误调用 `motor_control::adc_error()`，也不传句柄。三个必需输入组都要在每帧提交，
+缺少任一组会停止控制，避免静默复用旧输入。原始 ADC 零点、饱和和校准处理留在 board 层。
+`set_encoder_angle(electrical_radians)` 是可选的电角度输入，单位 rad；当前三个模式仍为
+无感模式，保存该输入不会自动切换到编码器控制。
+
+串口适配层用 `data_port::bind(Driver)` 提供 TX 是否空闲、发送、恢复接收、临界区、
+内存屏障和毫秒时钟。接收数据用 `receive_byte()` / `receive()`，接收错误用
+`receive_error()`。应用协议不访问 `huart2` 或调用 HAL UART 函数，可换接其他传输驱动。
+
+`app/data_port.cpp` 作为独立编译单元参与构建，`setup.cpp` 不包含 `.cpp` 文件。
+当前 EIDE 工程会自动收集该源文件；其他构建系统也应将它加入源文件列表。
+PWM 输出和启动初始化仍有本板适配内容，移植时也需对应处理。
 
 ## ADC 数据排列与 BLDC 接入
 
@@ -62,11 +88,19 @@ FOC 保持用同步 A/B 电流做两相 Clarke；重建的 C 相用于遥测和�
 每次完整 ADC DMA 回调均按 U/V/W 顺序发布给 BLDC，待机时也更新，
 因此收到有效采样后 `bfb=1`，可通过原有 BLDC 启动反馈检查。
 
+当前 PWM 关断续流区采样时，悬空相负电压会被 ADC 钳在零附近。BLDC 检测现在根据
+两个导通桥臂的实测电压识别续流区，对钳位波形分别检测上升/下降边沿，再进行换相延时；
+不再要求这种采样波形跨过一个无法测得的负阈值。导通区使用双极性反电动势。
+启动接管时，在消隐结束后对有效的过零后半周累计延时，不强制要求先观察到过零前电平，
+避免启动相位错开后下降沿扇区始终无法接管。仍需连续 12 次有效换相才报告锁定。
+BLDC 的线电流 PI 由积分项建立反电动势所需电压，不在锁定瞬间叠加速度前馈，
+避免重复补偿和换相周期抖动经前馈放大；FOC 电流环及观测器参数保持独立。
+
 BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 相电压输入无效或停止发布时保留 `cmd=6` / `f=13` 的反馈保护。
 本次按现有配置解析采样，保留用户的 ADC/PWM 触发时序，没有修改 `.ioc`、`Core`、
 `Drivers` 或 Keil 工程。BLDC 的实际相序、PWM 采样窗口和换相仍需实机验证，
-主机信号测试不代表已经完成带载调试；本次没有烧录或启动真实电机。
+主机信号测试不代表已经完成带载调试。
 
 ## 串口与上位机
 
@@ -85,6 +119,9 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 
 ```text
 python matlab/tests/test_motor_modes.py
+python matlab/tests/test_data_ports.py
+python matlab/tests/test_bldc_pwm_off.py
+python matlab/tests/test_bldc_startup.py
 python matlab/tests/test_adc_rank_sync.py
 python matlab/tests/test_clark_two_phase.py
 python matlab/tests/test_startup_regression.py
