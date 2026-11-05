@@ -121,12 +121,29 @@ recover_uart:
                 const uint32_t mask = data_port::enter_critical();
                 if (limit) speed_current_limit = command.value;
                 else if (speed) {
-                    speed_setpoint = command.value;
                     if (current_mode) {
                         speed_reference = speed_feedback = cfg::direction * motor_speed();
                         speed_elapsed = 0.0f;
                         pi_speed.integral = pi_speed.output = cfg::direction * iq_reference;
+                        speed_voltage_limited = false;
+                    } else if (command.value < speed_setpoint) {
+                        const float measured = cfg::direction * motor_speed();
+                        const float target = command.value * (2.0f * kPi * FOC_POLE_PAIRS / 60.0f);
+                        const float ceiling = measured > target ? measured : target;
+                        // An unreachable old command must not keep the ramp
+                        // above both the real speed and the new lower target.
+                        if (speed_reference > ceiling) {
+                            speed_reference = ceiling;
+                            speed_feedback = measured;
+                            speed_elapsed = 0.0f;
+                            track_speed_integral();
+                            pi_speed.input = speed_reference - speed_feedback;
+                            pi_speed.output = clamp(pi_speed.kp * pi_speed.input + pi_speed.integral,
+                                                    speed_current_limit);
+                            if (pi_speed.output > iq_voltage_limit) pi_speed.output = iq_voltage_limit;
+                        }
                     }
+                    speed_setpoint = command.value;
                     current_mode = false;
                     if (speed_setpoint == 0.0f) service_command('S');
                 } else {

@@ -71,6 +71,8 @@ void current_control(float angle, float target_d, float target_q)
     const float limited_d = clamp(U_d, maximum);
     const float q_budget_sq = maximum * maximum - limited_d * limited_d;
     const float limited_q = clamp(U_q, foc_sqrt(q_budget_sq > 0.0f ? q_budget_sq : 0.0f));
+    if (!current_mode && !detecting && cfg::direction * target_q > 0.0f &&
+        cfg::direction * (U_q - limited_q) > 0.0f) speed_voltage_limited = true;
     pi_d.integral += limited_d - U_d;
     pi_q.integral += limited_q - U_q;
     U_d = limited_d; U_q = limited_q;

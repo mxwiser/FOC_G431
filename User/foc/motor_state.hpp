@@ -40,6 +40,8 @@ float iq_voltage_limit = cfg::current;
 float speed_setpoint = cfg::default_speed_rpm, speed_current_limit = cfg::current;
 float requested_current_limit() { return current_mode ? iq_setpoint : speed_current_limit; }
 float speed_reference = 0.0f, speed_feedback = 0.0f, speed_elapsed = 0.0f;
+// Latched by the current loop until the next speed-loop update.
+bool speed_voltage_limited = false;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
 uint32_t coast_until = 0;

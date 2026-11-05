@@ -15,6 +15,8 @@ void bldc_drive_sample()
                       cfg::direction * iq_reference, sample_dt)) {
         retry_motor(bldc_state.locked ? LOST_LOCK : STARTUP_TIMEOUT); return;
     }
+    if (!current_mode && cfg::direction * iq_reference > 0.0f &&
+        bldc_state.duty >= config.max_duty - 0.000001f) speed_voltage_limited = true;
     I_d = 0.0f; // No d-axis exists in this mode; iq is the signed line current.
     I_q = cfg::direction * bldc_state.current;
     electrical_angle = bldc_state.sector * bldc::sector_radians;

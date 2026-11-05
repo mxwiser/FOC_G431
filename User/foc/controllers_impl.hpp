@@ -37,6 +37,17 @@ void configure_controllers()
     startup_config.hold_seconds = cfg::startup_hold_seconds;
     startup_config.flux_linkage = motor_flux;
     speed_reference = speed_feedback = speed_elapsed = 0.0f;
+    speed_voltage_limited = false;
+}
+
+void track_speed_integral()
+{
+    // Preserve delivered load torque, rather than an unattainable current
+    // request. Never turn a negative braking integral into positive torque.
+    const float limit = speed_current_limit < iq_voltage_limit ? speed_current_limit : iq_voltage_limit;
+    float delivered = clamp(cfg::direction * I_q, limit);
+    if (delivered < 0.0f) delivered = 0.0f;
+    if (pi_speed.integral > delivered) pi_speed.integral = delivered;
 }
 
 void update_iq_voltage_limit()
@@ -64,6 +75,8 @@ float speed_control_reference()
     if (speed_elapsed >= cfg::speed_loop_seconds) {
         const float elapsed = speed_elapsed;
         speed_elapsed = 0.0f;
+        const bool voltage_limited = speed_voltage_limited;
+        speed_voltage_limited = false;
         const float rpm_to_electrical = 2.0f * kPi * FOC_POLE_PAIRS / 60.0f;
         // Use the slower end of the move, so a step to or from low speed
         // cannot bypass the low-speed ramp limit.
@@ -81,11 +94,13 @@ float speed_control_reference()
         // derating limits positive torque; it must not suppress braking.
         pi_speed.output_limit = speed_current_limit;
         pi_speed.input = speed_reference - speed_feedback;
+        if (pi_speed.input > 0.0f && (voltage_limited || pi_speed.integral > limit))
+            track_speed_integral();
         const float previous_integral = clamp(pi_speed.integral, speed_current_limit);
         calculate_PI(&pi_speed);
         // Keep PI anti-windup at the asymmetric positive voltage limit,
         // while retaining negative integral/output for regenerative torque.
-        if (pi_speed.output > limit && pi_speed.input > 0.0f) {
+        if ((pi_speed.output > limit || voltage_limited) && pi_speed.input > 0.0f) {
             pi_speed.integral = previous_integral;
             pi_speed.output = clamp(pi_speed.kp * pi_speed.input + pi_speed.integral,
                                     speed_current_limit);

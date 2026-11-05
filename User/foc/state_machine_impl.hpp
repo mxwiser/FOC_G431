@@ -18,6 +18,7 @@ void bridge_off()
     iq_reference = 0.0f;
     iq_voltage_limit = requested_current_limit();
     speed_reference = speed_elapsed = 0.0f;
+    speed_voltage_limited = false;
 }
 
 void motor_fail(MotorFault fault)
