@@ -78,15 +78,8 @@ float speed_control_reference()
         const bool voltage_limited = speed_voltage_limited;
         speed_voltage_limited = false;
         const float rpm_to_electrical = 2.0f * kPi * FOC_POLE_PAIRS / 60.0f;
-        // Use the slower end of the move, so a step to or from low speed
-        // cannot bypass the low-speed ramp limit.
-        const float reference_rpm = speed_reference / rpm_to_electrical;
-        const float ramp_speed_rpm = reference_rpm < speed_setpoint ? reference_rpm : speed_setpoint;
-        const float ramp_fraction = clamp((ramp_speed_rpm - cfg::speed_ramp_fast_start_rpm) /
-            (cfg::speed_ramp_fast_full_rpm - cfg::speed_ramp_fast_start_rpm), 1.0f);
-        const float ramp = cfg::speed_ramp_rpm_per_second +
-            (cfg::speed_ramp_fast_rpm_per_second - cfg::speed_ramp_rpm_per_second) *
-            (ramp_fraction > 0.0f ? ramp_fraction : 0.0f);
+        const bool bldc_starting = motor_mode == MOTOR_BLDC && motor_state == OPEN_LOOP && !bldc_state.locked;
+        const float ramp = bldc_starting ? cfg::bldc_startup_speed_ramp_rpm_per_second : cfg::speed_ramp_rpm_per_second;
         speed_reference += clamp(speed_setpoint * rpm_to_electrical - speed_reference,
             ramp * rpm_to_electrical * elapsed);
         pi_speed.dt = elapsed;

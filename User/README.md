@@ -126,7 +126,9 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 - `obs=O/M/B` 对应 Ortega、MXLEMMING、BLDC；BLDC 下 `id=0`，`iq` 为有符号线电流。
 - 仍使用 `mode=I/S` 表示电流/速度控制，与算法选择 `drv` 分开。
 - 速度环允许负转矩电流制动，FOC 和 BLDC 都受 `ILIM` 的正负幅值限制，电流变化率为 100 A/s。
-  正向转矩仍受反电动势电压裕量限制；该降额不禁止负向制动。转速参考斜坡保持原配置。
+  正向转矩仍受反电动势电压裕量限制；该降额不禁止负向制动。加减速参考斜坡均固定为
+  VESC 默认的 25000 ERPM/s，当前 10 对极对应 2500 rpm/s，不再按低速分段降额。
+  BLDC 未锁定的启动阶段保留 500 rpm/s，锁定运行后使用上述固定斜坡。
   降目标时，超出实际转速和新目标的旧参考会被裁剪，并按实际转矩电流约束正积分。
   FOC 电压限幅和 BLDC 最大占空比会反馈给速度环，避免不可达高目标导致积分继续增长。
   制动会向母线回送能量，默认母线高于 30 V 时触发保护；当前没有完整的电池回充电流/BMS 限制。
@@ -140,6 +142,7 @@ python matlab/tests/test_data_ports.py
 python matlab/tests/test_command_ranges.py
 python matlab/tests/test_speed_braking.py
 python matlab/tests/test_unreachable_speed_fix.py
+python matlab/tests/test_vesc_speed_ramp.py
 python matlab/tests/test_bldc_pwm_off.py
 python matlab/tests/test_bldc_startup.py
 python matlab/tests/test_bldc_commutation_transient.py
