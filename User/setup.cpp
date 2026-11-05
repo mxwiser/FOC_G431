@@ -9,6 +9,10 @@
 #include "foc/vesc_observer.hpp"
 #include "foc/vesc_startup.hpp"
 #include "serial_command.hpp"
+#include "motor_mode.hpp"
+#include "bldc/bldc.hpp"
+#include "bldc/phase_feedback.hpp"
+#include "bldc/timer_output.hpp"
 #include <cmath>
 #include <stdio.h>
 #if defined(__CC_ARM)
@@ -17,8 +21,11 @@
 
 namespace {
 namespace cfg = sensorless_config;
-const VescObserverType kObserverType = cfg::use_mxlemming
-    ? VESC_OBSERVER_MXLEMMING_LAMBDA_COMP : VESC_OBSERVER_ORTEGA_LAMBDA_COMP;
+MotorMode motor_mode = cfg::use_mxlemming ? MOTOR_FOC_MXLEMMING : MOTOR_FOC_ORTEGA;
+VescObserverType motor_observer_type() {
+    return motor_mode == MOTOR_FOC_MXLEMMING ? VESC_OBSERVER_MXLEMMING_LAMBDA_COMP
+        : VESC_OBSERVER_ORTEGA_LAMBDA_COMP;
+}
 const float kPi = 3.14159265358979323846f;
 const float kAmpsPerCount = 0.02946541f;
 const uint32_t kZeroSamples = 2048u;
@@ -26,7 +33,7 @@ enum MotorState { ZERO, IDLE, BOOTSTRAP, DETECT_R, DETECT_L,
     ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND /* 旧协议保留值，正常启动不再经过此状态 */, RUN, FAULT, RETRY_WAIT };
 enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
     BAD_BUS, BAD_CONFIG, ALIGN_FAILED, STARTUP_TIMEOUT,
-    LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR };
+    LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR, BLDC_FEEDBACK_ERROR };
 
 __align(4) uint16_t adc_buffer[4];
 volatile MotorState motor_state = ZERO;
@@ -57,7 +64,8 @@ float speed_setpoint = cfg::default_speed_rpm, speed_current_limit = cfg::curren
 float speed_reference = 0.0f, speed_feedback = 0.0f, speed_elapsed = 0.0f;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
-enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX };
+enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX,
+    COMMAND_FEEDBACK, COMMAND_UNSUPPORTED };
 CommandResult command_result = COMMAND_NONE;
 uint8_t uart_rx_byte;
 volatile uint8_t uart_rx_data[256];
@@ -110,6 +118,14 @@ VescObserverState observer = {};
 VescStartupConfig startup_config = {};
 VescStartupState startup = {};
 float startup_elapsed, startup_iq_filtered;
+bldc::State bldc_state = {};
+float bldc_phase_voltage[3] = {};
+uint32_t bldc_feedback_frame = 0;
+bool bldc_feedback_published = false;
+bool bldc_feedback_ready() {
+    return bldc_feedback_published && sample_frames - bldc_feedback_frame <= 2u;
+}
+float motor_speed() { return motor_mode == MOTOR_BLDC ? bldc_state.speed : observer.speed; }
 
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
 // Optional SWD capture; omitted entirely from normal firmware.
@@ -231,7 +247,7 @@ void configure_controllers()
     observer_config.pll_kp = 1000.0f;
     observer_config.pll_ki = 250000.0f;
     observer_config.minimum_speed = cfg::minimum_rad_s;
-    observer_config.type = kObserverType;
+    observer_config.type = motor_observer_type();
     vesc_observer_reset(observer_config, observer, 0.0f);
     observer_phase = 0.0f;
     VescStartupState cleared_startup = {};
@@ -261,7 +277,7 @@ void update_iq_voltage_limit()
 float speed_control_reference()
 {
     const float filter = sample_dt / (cfg::speed_filter_seconds + sample_dt);
-    speed_feedback += filter * (cfg::direction * observer.speed - speed_feedback);
+    speed_feedback += filter * (cfg::direction * motor_speed() - speed_feedback);
     speed_elapsed += sample_dt;
     const float limit = speed_current_limit < iq_voltage_limit ? speed_current_limit : iq_voltage_limit;
     if (speed_elapsed >= cfg::speed_loop_seconds) {
@@ -296,233 +312,9 @@ float speed_control_reference()
     return cfg::direction * reference;
 }
 
-// SI volts -> VESC modulation -> timer ticks. Save quantized voltage / Udc.
-void output_voltage(float U_alpha, float U_beta, bool vector_limited = false)
-{
-#if defined(STM32G431xx)
-    const uint32_t start_cycles = DWT->CYCCNT;
-#endif
-    if (!foc_finite(U_alpha) || !foc_finite(U_beta) || !(Udc_quant > 0.0f)) {
-        motor_fail(NUMERIC_ERROR); return;
-    }
-    const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
-    if (!vector_limited) {
-        const float magnitude = foc_sqrt(U_alpha * U_alpha + U_beta * U_beta);
-        if (magnitude > maximum) { U_alpha *= maximum / magnitude; U_beta *= maximum / magnitude; }
-    }
-    uint32_t tA, tB, tC;
-    const uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
-    svpwm_fast(1.5f * U_alpha / Udc_quant, 1.5f * U_beta / Udc_quant,
-            cfg::max_modulation, period, &tA, &tB, &tC);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, tA);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, tB);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, tC);
-#if defined(STM32G431xx)
-    const uint32_t write_cycles = DWT->CYCCNT - isr_start_cycle;
-    if (write_cycles > pwm_write_max_cycles) pwm_write_max_cycles = write_cycles;
-#endif
-    older_alpha = prior_alpha; older_beta = prior_beta;
-    prior_alpha = (2.0f * tA - tB - tC) / (3.0f * period);
-    prior_beta = (static_cast<float>(tB) - tC) * ONE_BY_SQRT3 / period;
-#if defined(STM32G431xx)
-    const uint32_t cycles = DWT->CYCCNT - start_cycles;
-    if (cycles > pwm_max_cycles) pwm_max_cycles = cycles;
-#endif
-}
-
-void current_control(float angle, float target_d, float target_q)
-{
-#if defined(STM32G431xx)
-    const uint32_t start_cycles = DWT->CYCCNT;
-#endif
-    electrical_angle = angle;
-    iq_reference = target_q;
-    float sn, cs;
-    foc_fast_sincos(angle, sn, cs);
-    I_d = I_alpha * cs + I_beta * sn;
-    I_q = -I_alpha * sn + I_beta * cs;
-    // 与 VESC 的 iq_filter 一致，仅用于低速辅助管理，观测器仍使用未滤波的 alpha/beta 电流。
-    startup_iq_filtered += 0.1f * (I_q - startup_iq_filtered);
-    const float maximum = Udc_quant * cfg::max_modulation * ONE_BY_SQRT3;
-    pi_d.output_limit = pi_q.output_limit = maximum;
-    pi_d.input = target_d - I_d; pi_q.input = target_q - I_q;
-    calculate_PI(&pi_d); calculate_PI(&pi_q);
-    float U_d = pi_d.output, U_q = pi_q.output;
-    if (!detecting && motor_state != ALIGN && motor_flux > 0.0f) {
-        // VESC-style cross-coupling and back-EMF feedforward. Important when
-        // R and L are small: PI alone reacts too late during acceleration.
-        float speed = motor_state == OPEN_LOOP && !detecting && !startup.phase_override
-            ? observer.speed : openloop_speed;
-        if (motor_state == RUN) speed = observer.speed;
-        const float difference = motor_state == OPEN_LOOP ? 0.0f :
-            vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f - angle);
-        float difference_sin, difference_cos;
-        foc_fast_sincos(difference, difference_sin, difference_cos);
-        U_d += -speed * motor_inductance * I_q - speed * motor_flux * difference_sin;
-        U_q += speed * motor_inductance * I_d + speed * motor_flux * difference_cos;
-    }
-    // Preserve d-axis regulation as back EMF consumes the voltage budget.
-    // Uniform vector scaling also weakens Ud, allowing uncontrolled Id.
-    const float limited_d = clamp(U_d, maximum);
-    const float q_budget_sq = maximum * maximum - limited_d * limited_d;
-    const float limited_q = clamp(U_q, foc_sqrt(q_budget_sq > 0.0f ? q_budget_sq : 0.0f));
-    pi_d.integral += limited_d - U_d;
-    pi_q.integral += limited_q - U_q;
-    U_d = limited_d; U_q = limited_q;
-    output_voltage(U_d * cs - U_q * sn, U_d * sn + U_q * cs, true);
-#if defined(STM32G431xx)
-    const uint32_t cycles = DWT->CYCCNT - start_cycles;
-    if (cycles > current_max_cycles) current_max_cycles = cycles;
-#endif
-}
-
-void update_resistance()
-{
-    const float target = cfg::current * (detect_stage == 0 ? 0.5f : 1.0f);
-    detect_voltage = clamp(detect_voltage + 20.0f * (target - I_alpha) * sample_dt, Udc_quant * 0.35f);
-    output_voltage(detect_voltage, 0.0f);
-    if (state_time > 2.0f) { sum_i += I_alpha; sum_v += applied_alpha; ++detect_samples; }
-    if (state_time < 3.0f) return;
-    const float mean_i = sum_i / detect_samples, mean_v = sum_v / detect_samples;
-    if (detect_stage == 0) {
-        low_i = mean_i; low_v = mean_v; detect_stage = 1; enter_state(DETECT_R);
-    } else {
-        // Two positive plateaus remove most of the constant bridge drop.
-        motor_resistance = (mean_v - low_v) / (mean_i - low_i);
-        detect_bias = mean_v - motor_resistance * mean_i;
-        if (!foc_finite(motor_resistance) || motor_resistance <= 0.001f || motor_resistance >= 100.0f ||
-            mean_i < cfg::current * 0.7f || mean_i - low_i < cfg::current * 0.25f) {
-            motor_fail(DETECT_FAILED); return;
-        }
-        detect_stage = 0; enter_state(DETECT_L);
-    }
-}
-
-void update_inductance()
-{
-    const float frequency = detect_stage == 0 ? 200.0f : 700.0f;
-    const float omega = 2.0f * kPi * frequency;
-    detect_phase = vesc_observer_wrap(detect_phase + omega * sample_dt);
-    const float phase = detect_phase;
-    if (state_time > 0.2f) {
-        const float cs = std::cos(phase), sn = std::sin(phase);
-        lockin_ic += I_alpha * cs; lockin_is += I_alpha * sn;
-        lockin_vc += applied_alpha * cs; lockin_vs += applied_alpha * sn; ++detect_samples;
-    }
-    const float dc = motor_resistance * cfg::current * 0.75f + detect_bias;
-    const float ac = motor_resistance * cfg::current * 0.375f;
-    output_voltage(dc + ac * std::cos(phase), 0.0f);
-    if (state_time < 1.2f) return;
-    // Interval-average voltage -> current sample instant (sinusoidal steady state).
-    const float half = omega * sample_dt * 0.5f, cs = std::cos(half), sn = std::sin(half);
-    const float sinc = sn / half;
-    const float vc = (lockin_vc * cs + lockin_vs * sn) / sinc;
-    const float vs = (lockin_vs * cs - lockin_vc * sn) / sinc;
-    const float current_sq = lockin_ic * lockin_ic + lockin_is * lockin_is;
-    const float amplitude = 2.0f * foc_sqrt(current_sq) / detect_samples;
-    const float inductance = (vc * lockin_is - vs * lockin_ic) / (current_sq * omega);
-    const float ac_resistance = (vc * lockin_ic + vs * lockin_is) / current_sq;
-    if (!foc_finite(inductance) || inductance <= 0.000001f || inductance >= 0.1f ||
-        amplitude < 0.015f || foc_abs(ac_resistance / motor_resistance - 1.0f) > 0.35f) {
-        motor_fail(DETECT_FAILED); return;
-    }
-    if (detect_stage == 0) {
-        first_inductance = inductance; detect_stage = 1; enter_state(DETECT_L);
-    } else {
-        if (foc_abs(inductance / first_inductance - 1.0f) > 0.35f) { motor_fail(DETECT_FAILED); return; }
-        motor_inductance = 0.5f * (inductance + first_inductance);
-        configure_controllers(); openloop_angle = openloop_speed = 0.0f;
-        detect_stage = 0; enter_state(ALIGN);
-    }
-}
-
-void update_flux()
-{
-    openloop_angle = vesc_observer_wrap(openloop_angle + openloop_speed * sample_dt);
-    const float phase_mid = openloop_angle - openloop_speed * sample_dt * 0.5f;
-    const float ea = applied_alpha - motor_resistance * 0.5f * (I_alpha + last_I_alpha)
-        - motor_inductance * (I_alpha - last_I_alpha) / sample_dt;
-    const float eb = applied_beta - motor_resistance * 0.5f * (I_beta + last_I_beta)
-        - motor_inductance * (I_beta - last_I_beta) / sample_dt;
-    const float filter = sample_dt / (0.0005f + sample_dt);
-    filtered_emf_a += filter * (ea - filtered_emf_a);
-    filtered_emf_b += filter * (eb - filtered_emf_b);
-    if (state_time > 0.5f) {
-        const float cs = std::cos(phase_mid), sn = std::sin(phase_mid);
-        emf_d += filtered_emf_a * cs + filtered_emf_b * sn;
-        emf_q += -filtered_emf_a * sn + filtered_emf_b * cs;
-        emf_abs += foc_sqrt(filtered_emf_a * filtered_emf_a + filtered_emf_b * filtered_emf_b);
-        ++detect_samples;
-    }
-    current_control(openloop_angle, cfg::current, 0.0f);
-    if (state_time < 1.5f) return;
-    const float magnitude = foc_sqrt(emf_d * emf_d + emf_q * emf_q);
-    const float lag = openloop_speed * 0.0005f;
-    const float flux = magnitude * foc_sqrt(1.0f + lag * lag) / (detect_samples * foc_abs(openloop_speed));
-    if (!foc_finite(flux) || flux <= 0.00001f || flux >= 1.0f ||
-        magnitude < 0.7f * emf_abs || magnitude / detect_samples < 0.03f) {
-        motor_fail(DETECT_FAILED); return;
-    }
-    if (detect_stage == 0) { first_flux = flux; detect_stage = 1; enter_state(OPEN_LOOP); }
-    else {
-        if (foc_abs(flux / first_flux - 1.0f) > 0.2f) { motor_fail(DETECT_FAILED); return; }
-        motor_flux = 0.5f * (flux + first_flux); parameters_ready = model_valid();
-        bridge_off(); coast_until = HAL_GetTick() + 2000u; enter_state(IDLE);
-    }
-}
-
-void sensorless_drive_sample()
-{
-    // VESC 的低速辅助按 1 kHz 运行；电流环与观测器仍按 ADC 采样频率执行。
-    startup_elapsed += sample_dt;
-    if (startup_elapsed >= cfg::startup_manager_seconds) {
-        float sn, cs;
-        foc_fast_sincos(electrical_angle, sn, cs);
-        const float q_voltage = prior_beta * cs - prior_alpha * sn;
-        const float duty_magnitude = 1.7320508075688772f *
-            foc_sqrt(prior_alpha * prior_alpha + prior_beta * prior_beta);
-        const float duty = q_voltage < 0.0f ? -duty_magnitude : duty_magnitude;
-        const float maximum_current = current_mode ? cfg::max_iq : speed_current_limit;
-        vesc_startup_update(startup_config, startup, observer_phase, observer.speed,
-                            startup_iq_filtered, maximum_current, duty, true, cfg::startup_manager_seconds);
-        startup_elapsed -= cfg::startup_manager_seconds;
-    }
-
-    float phase = vesc_observer_wrap(observer_phase + observer.speed * sample_dt * 0.5f);
-    if (startup.phase_override) {
-        // 与 VESC 的 FOC_SENSOR_MODE_SENSORLESS 分支一致：强制相位驱动，同时预置观测器磁链。
-        phase = startup.phase;
-        observer.x1 = startup.x1;
-        observer.x2 = startup.x2;
-    }
-    openloop_angle = startup.phase;
-    openloop_speed = startup.forced_speed;
-    update_iq_voltage_limit();
-    float reference;
-    if (current_mode) {
-        const float allowed = iq_setpoint < iq_voltage_limit ? iq_setpoint : iq_voltage_limit;
-        reference = iq_reference + clamp(cfg::direction * allowed - iq_reference,
-                                            cfg::iq_slew_per_second * sample_dt);
-        if (cfg::direction * reference > iq_voltage_limit) reference = cfg::direction * iq_voltage_limit;
-    } else reference = speed_control_reference();
-    // VESC 无感启动和运行都使用 Iq 产生转矩，Id 目标保持为零。
-    // 开环辅助定时结束便直接使用观测器相位；速度环不再等待原先连续 0.2 秒的接管门槛。
-    current_control(phase, 0.0f, reference);
-
-    const bool quality = !startup.phase_override && observer.ready &&
-        cfg::direction * observer.speed > cfg::minimum_rad_s && foc_abs(observer.speed) * sample_dt < 0.8f;
-    if (motor_state == OPEN_LOOP) {
-        // 以下仅确认启动成功并保留 G431 原有超时/冷却保护，不阻塞上述 Iq/速度闭环控制。
-        // 使用累加/衰减的滞回，单个采样抖动不会清空已经取得的稳定时间。
-        if (quality) stable_time += sample_dt;
-        else if (stable_time > 0.0f) stable_time -= sample_dt;
-        if (stable_time >= cfg::lock_seconds) { enter_state(RUN); return; }
-        if (state_time >= cfg::startup_timeout) retry_motor(STARTUP_TIMEOUT);
-    } else {
-        if (quality) lost_time = 0.0f; else lost_time += sample_dt;
-        if (lost_time >= cfg::lost_seconds) retry_motor(LOST_LOCK);
-    }
-}
+#include "foc/drive_impl.hpp"
+#include "foc/parameter_detection_impl.hpp"
+#include "bldc/drive_impl.hpp"
 
 void control_sample()
 {
@@ -530,7 +322,11 @@ void control_sample()
     if (motor_state == BOOTSTRAP) {
         if (state_time >= 0.005f) {
             if (detecting) { detect_voltage = 0.0f; detect_stage = 0; enter_state(DETECT_R); }
-            else { configure_controllers(); openloop_angle = openloop_speed = 0.0f; enter_state(OPEN_LOOP); }
+            else {
+                configure_controllers(); openloop_angle = openloop_speed = 0.0f;
+                bldc::reset(bldc_state);
+                enter_state(OPEN_LOOP);
+            }
         }
         return;
     }
@@ -538,7 +334,9 @@ void control_sample()
     if (motor_state == DETECT_L) { update_inductance(); return; }
     if (motor_state == DETECT_FLUX) { update_flux(); return; }
     if (!detecting && (motor_state == OPEN_LOOP || motor_state == RUN)) {
-        sensorless_drive_sample(); return;
+        if (motor_mode == MOTOR_BLDC) bldc_drive_sample();
+        else sensorless_drive_sample();
+        return;
     }
     if (motor_state == ALIGN) {
         // 仅参数辨识流程使用 Id 对齐；正常启动已在 BOOTSTRAP 后直接进入 Iq 驱动。
@@ -581,13 +379,16 @@ bool start_motor(bool detect)
     if (motor_state != IDLE || !limits_valid() || (!detect && !parameters_ready)) return false;
     if (!detect && current_mode && iq_setpoint <= 0.0f) return false;
     if (!detect && !current_mode && speed_setpoint <= 0.0f) return false;
+    if (motor_mode == MOTOR_BLDC && (detect || !bldc_feedback_ready())) return false;
     if (static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return false;
     if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return false; }
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     detecting = detect;
     run_requested = !detect;
     if (detect) parameters_ready = false;
-    bridge_off(); __HAL_TIM_SET_COUNTER(&htim1, 0u);
+    bridge_off();
+    motor_timer_foc(); // Bootstrap all three low sides before either drive starts.
+    __HAL_TIM_SET_COUNTER(&htim1, 0u);
     if (HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE) != HAL_OK) {
         motor_fail(PWM_ERROR); __set_PRIMASK(mask); return false;
     }
@@ -619,6 +420,12 @@ void service_command(uint8_t command)
         __set_PRIMASK(mask);
         command_result = COMMAND_OK;
     } else if (command == 'd' || command == 'D' || command == 'r' || command == 'R') {
+        if (motor_mode == MOTOR_BLDC && (command == 'd' || command == 'D')) {
+            command_result = COMMAND_UNSUPPORTED; return;
+        }
+        if (motor_mode == MOTOR_BLDC && !bldc_feedback_ready()) {
+            command_result = COMMAND_FEEDBACK; return;
+        }
         if (start_motor(command == 'd' || command == 'D')) {
             retry_attempts = 0;
             restart_reason = NO_FAULT;
@@ -675,6 +482,22 @@ recover_uart:
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
+        else if (command.type == SERIAL_SET_MOTOR_MODE) {
+            if (!foc_finite(command.value) || command.value < 0.0f || command.value > 2.0f ||
+                command.value != static_cast<float>(static_cast<unsigned>(command.value))) {
+                command_result = COMMAND_RANGE;
+            } else if (motor_state != IDLE || run_requested || motor_fault != NO_FAULT) {
+                command_result = COMMAND_BUSY;
+            } else {
+                bridge_off();
+                motor_timer_foc();
+                motor_mode = static_cast<MotorMode>(static_cast<unsigned>(command.value));
+                detecting = false;
+                bldc::reset(bldc_state);
+                configure_controllers();
+                command_result = COMMAND_OK;
+            }
+        }
         else if (command.type == SERIAL_SET_PHASES) {
             if (foc_finite(command.value) && command.value >= 0.0f && command.value <= 7.0f) {
                 const uint8_t phases = static_cast<uint8_t>(command.value);
@@ -703,7 +526,7 @@ recover_uart:
                 else if (speed) {
                     speed_setpoint = command.value;
                     if (current_mode) {
-                        speed_reference = speed_feedback = cfg::direction * observer.speed;
+                        speed_reference = speed_feedback = cfg::direction * motor_speed();
                         speed_elapsed = 0.0f;
                         pi_speed.integral = pi_speed.output = cfg::direction * iq_reference;
                     }
@@ -731,7 +554,7 @@ bool send_status()
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
     const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
     const float bus = Udc_quant, id = inactive ? 0.0f : I_d, iq = inactive ? 0.0f : I_q;
-    const float speed = inactive ? 0.0f : observer.speed;
+    const float speed = inactive ? 0.0f : motor_speed();
     const float r = motor_resistance, l = motor_inductance, flux = motor_flux, ia = I_alpha;
     // Same ADC frame, before Clarke/Park or observer filtering. Keep the
     // legacy ia=Ialpha field for existing serial clients; i_a/i_b/i_c are phases.
@@ -741,9 +564,15 @@ bool send_status()
     const float phase_c = (phases & 4u) ? I_c : 0.0f;
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
-    const bool ready = parameters_ready, locked = observer.ready && !inactive;
-    const bool forced_phase = !inactive && !detecting && startup.phase_override;
-    const char observer_type = observer_config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP ? 'M' : 'O';
+    const bool ready = parameters_ready;
+    const bool locked = !inactive && motor_fault == NO_FAULT &&
+        (motor_mode == MOTOR_BLDC ? bldc_state.locked : observer.ready);
+    const bool forced_phase = !inactive && !detecting &&
+        (motor_mode == MOTOR_BLDC ? !bldc_state.locked : startup.phase_override);
+    const char observer_type = motor_mode == MOTOR_BLDC ? 'B' :
+        (observer_config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP ? 'M' : 'O');
+    const unsigned drive = static_cast<unsigned>(motor_mode);
+    const bool feedback = bldc_feedback_ready();
     const uint32_t frames = sample_frames;
     const float target_iq = iq_setpoint, reference_iq = iq_reference, iq_cap = iq_voltage_limit;
     const bool mode = current_mode, armed = run_requested;
@@ -756,14 +585,15 @@ bool send_status()
     const float speed_limit = speed_current_limit;
     __set_PRIMASK(mask);
     int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u,ol=%d,obs=%c",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u,ol=%d,obs=%c,drv=%u,bfb=%d",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,
         static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
         mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
         static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap,
-        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases), forced_phase ? 1 : 0, observer_type);
+        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases), forced_phase ? 1 : 0,
+        observer_type, drive, feedback ? 1 : 0);
     if (length <= 0 || length >= static_cast<int>(sizeof(text))) return false;
     const char *names[] = {",i_a=%.4f", ",i_b=%.4f", ",i_c=%.4f"};
     const float values[] = {phase_a, phase_b, phase_c};
@@ -868,6 +698,18 @@ void record_current_diagnostic()
 #endif
 } // namespace
 
+extern "C" void bldc_publish_phase_voltages(float a, float b, float c)
+{
+    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    bldc_feedback_published = foc_finite(a) && foc_finite(b) && foc_finite(c) &&
+        a >= -0.5f && b >= -0.5f && c >= -0.5f &&
+        a <= Udc_quant + 0.5f && b <= Udc_quant + 0.5f && c <= Udc_quant + 0.5f;
+    bldc_phase_voltage[0] = a; bldc_phase_voltage[1] = b; bldc_phase_voltage[2] = c;
+    bldc_feedback_frame = sample_frames;
+    __DMB();
+    __set_PRIMASK(mask);
+}
+
 static void adc_sample(ADC_HandleTypeDef *hadc)
 {
     if (hadc != &hadc1) return;
@@ -910,7 +752,7 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
     // Peak sampling / valley CCR preload: half of each of the two last commands.
     applied_alpha = Udc_quant * 0.5f * (prior_alpha + older_alpha);
     applied_beta = Udc_quant * 0.5f * (prior_beta + older_beta);
-    const bool update_observer = !detecting &&
+    const bool update_observer = motor_mode != MOTOR_BLDC && !detecting &&
         (motor_state == OPEN_LOOP || motor_state == RUN);
     if (update_observer && motor_state != FAULT) {
 #if defined(STM32G431xx)
@@ -932,6 +774,7 @@ static void adc_sample(ADC_HandleTypeDef *hadc)
         if (cycles > observer_max_cycles) observer_max_cycles = cycles;
 #endif
     }
+    if (motor_mode == MOTOR_BLDC && !detecting && !bldc_feedback_ready()) motor_fail(BLDC_FEEDBACK_ERROR);
     if (motor_state != FAULT) control_sample();
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
     record_current_diagnostic();
@@ -992,7 +835,7 @@ extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void setup(void)
 {
     // 零点采集/待机时也准确报告所选类型；控制器其余参数仍在每次启动时初始化。
-    observer_config.type = kObserverType;
+    observer_config.type = motor_observer_type();
 #if defined(STM32G431xx)
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0;

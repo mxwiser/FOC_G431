@@ -2,6 +2,8 @@
 #include <cmath>
 #include "svpwm.h"
 #include "vesc_observer.hpp"
+#include "ortega_lambda.hpp"
+#include "mxlemming_lambda.hpp"
 #include <float.h>
 #if defined(__CC_ARM)
 #pragma Otime
@@ -207,52 +209,12 @@ bool vesc_observer_update(const VescObserverConfig &config,
 
     float L_ia = config.inductance * I_alpha;
     float L_ib = config.inductance * I_beta;
-    const float gamma_half = config.gain * 0.5f;
-    const float lambda_min = config.flux_linkage * 0.3f;
-    const float lambda_max = config.flux_linkage * 2.5f;
     if (config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP) {
-        /* LICENCE NOTE (from the original VESC/MESC implementation):
-         * This function deviates slightly from the BSD 3 clause licence.
-         * The work here is entirely original to the MESC FOC project, and not based
-         * on any appnotes, or borrowed from another project. This work is free to
-         * use, as granted in BSD 3 clause, with the exception that this note must
-         * be included in where this code is implemented/modified to use your
-         * variable names, structures containing variables or other minor
-         * rearrangements in place of the original names I have chosen, and credit
-         * to David Molony as the original author must be noted.
-         */
-        // 对齐本地 VESC 默认 MXLEMMING_LAMBDA_COMP：电压积分减去 L*delta_i。
-        state.x1 += (U_alpha - config.resistance * I_alpha) * dt
-            - config.inductance * (I_alpha - state.i_alpha_last);
-        state.x2 += (U_beta - config.resistance * I_beta) * dt
-            - config.inductance * (I_beta - state.i_beta_last);
-        const float error = state.lambda_est * state.lambda_est
-            - state.x1 * state.x1 - state.x2 * state.x2;
-        state.lambda_est += 0.1f * gamma_half * state.lambda_est * -error * dt;
-        if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
-        if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
-        if (state.x1 > state.lambda_est) state.x1 = state.lambda_est;
-        if (state.x1 < -state.lambda_est) state.x1 = -state.lambda_est;
-        if (state.x2 > state.lambda_est) state.x2 = state.lambda_est;
-        if (state.x2 < -state.lambda_est) state.x2 = -state.lambda_est;
-        // 此分支的 x1/x2 已是永磁磁链，统一求角度时不能再次减去 L*i。
+        mxlemming_lambda_update(config, state, U_alpha, U_beta, I_alpha, I_beta, dt);
+        // MXLEMMING state already stores PM flux, so do not subtract L*i again.
         L_ia = L_ib = 0.0f;
     } else {
-        const float flux_a = state.x1 - L_ia;
-        const float flux_b = state.x2 - L_ib;
-        // 与 VESC ORTEGA_LAMBDA_COMP 一致，直接使用物理磁链估计值计算完整误差。
-        float error = state.lambda_est * state.lambda_est
-            - flux_a * flux_a - flux_b * flux_b;
-        // 先用有符号误差更新 lambda_est，使其可增可减，再按标称磁链的 0.3~2.5 倍限幅。
-        state.lambda_est += 0.2f * gamma_half * state.lambda_est * -error * dt;
-        if (state.lambda_est < lambda_min) state.lambda_est = lambda_min;
-        if (state.lambda_est > lambda_max) state.lambda_est = lambda_max;
-        // 与 VESC 一致，仅磁链矢量的非线性校正项抑制正误差。
-        if (error > 0.0f) error = 0.0f;
-        state.x1 += (U_alpha - config.resistance * I_alpha
-            + gamma_half * flux_a * error) * dt;
-        state.x2 += (U_beta - config.resistance * I_beta
-            + gamma_half * flux_b * error) * dt;
+        ortega_lambda_update(config, state, U_alpha, U_beta, I_alpha, I_beta, dt);
     }
     state.i_alpha_last = I_alpha;
     state.i_beta_last = I_beta;

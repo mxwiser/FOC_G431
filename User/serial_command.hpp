@@ -3,12 +3,13 @@
 
 enum SerialCommandType {
     SERIAL_NONE, SERIAL_START, SERIAL_STOP, SERIAL_DETECT,
-    SERIAL_SET_IQ, SERIAL_SET_SPEED, SERIAL_SET_SPEED_LIMIT, SERIAL_SET_PHASES, SERIAL_INVALID
+    SERIAL_SET_IQ, SERIAL_SET_SPEED, SERIAL_SET_SPEED_LIMIT, SERIAL_SET_PHASES,
+    SERIAL_SET_MOTOR_MODE, SERIAL_INVALID
 };
 struct SerialCommand { SerialCommandType type; float value; };
 struct SerialCommandParser { char text[24]; uint8_t length; bool discarding; };
 
-// R/D/S are single characters; IQ=<A>, V=<mechanical rpm>, ILIM=<A> use CR/LF.
+// R/D/S are single characters; IQ=<A>, V=<rpm>, ILIM=<A>, M=<0|1|2> use CR/LF.
 // S also stops inside an incomplete/overlong command.
 inline bool serial_command_feed(SerialCommandParser &parser, uint8_t byte,
                                  SerialCommand &command)
@@ -38,6 +39,8 @@ inline bool serial_command_feed(SerialCommandParser &parser, uint8_t byte,
             (parser.text[1]=='L' || parser.text[1]=='l') && (parser.text[2]=='I' || parser.text[2]=='i') &&
             (parser.text[3]=='M' || parser.text[3]=='m') && parser.text[4]=='=') {
             index = 5; type = SERIAL_SET_SPEED_LIMIT;
+        } else if (length >= 3 && (parser.text[0]=='M' || parser.text[0]=='m') && parser.text[1]=='=') {
+            index = 2; type = SERIAL_SET_MOTOR_MODE;
         } else if (length >= 3 && (parser.text[0]=='P' || parser.text[0]=='p') &&
             (parser.text[1]=='H' || parser.text[1]=='h') && parser.text[2]=='=') {
             index = 3; type = SERIAL_SET_PHASES;
