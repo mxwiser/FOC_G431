@@ -4,9 +4,12 @@
 extern "C" void bldc_publish_phase_voltages(float a, float b, float c)
 {
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
-    bldc_feedback_published = foc_finite(a) && foc_finite(b) && foc_finite(c) &&
-        a >= -0.5f && b >= -0.5f && c >= -0.5f &&
-        a <= Udc_quant + 0.5f && b <= Udc_quant + 0.5f && c <= Udc_quant + 0.5f;
+    const bool active = motor_mode == MOTOR_BLDC &&
+        (motor_state == OPEN_LOOP || motor_state == RUN);
+    const float margin = active ? bldc::phase_voltage_margin(bldc_state, sample_dt) : 0.5f;
+    bldc_feedback_published = bldc::phase_voltage_valid(a, Udc_quant, margin) &&
+        bldc::phase_voltage_valid(b, Udc_quant, margin) &&
+        bldc::phase_voltage_valid(c, Udc_quant, margin);
     if (!bldc_feedback_published && !bldc_feedback_fault_capture.frame &&
         motor_mode == MOTOR_BLDC && motor_fault == NO_FAULT &&
         (motor_state == BOOTSTRAP || motor_state == OPEN_LOOP || motor_state == RUN)) {

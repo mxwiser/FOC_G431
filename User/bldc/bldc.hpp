@@ -33,6 +33,19 @@ inline void reset(State &s) {
     s = cleared;
     s.period = 0.02f;
 }
+inline bool commutation_blanking(const State &s, float dt) {
+    // VESC ignores the first two PWM cycles after a vector change. The
+    // initial 200 ms alignment is not a repeating commutation blank.
+    return s.elapsed >= 0.2f && s.sector_time < 2.0f * dt;
+}
+inline float phase_voltage_margin(const State &s, float dt) {
+    // This board measured +1.39 V on the newly floating phase. Permit a
+    // bounded diode/demagnetization transient only in the two-cycle blank.
+    return commutation_blanking(s, dt) ? 2.0f : 0.5f;
+}
+inline bool phase_voltage_valid(float voltage, float bus, float margin) {
+    return finite(voltage) && voltage >= -0.5f && voltage <= bus + margin;
+}
 inline float signed_bemf(const State &s, const float voltage[3], int direction) {
     const Step phase = step(s.sector);
     const float neutral = (voltage[0] + voltage[1] + voltage[2]) / 3.0f;
@@ -65,8 +78,9 @@ inline bool update(const Config &c, State &s, const float voltage[3],
         c.max_duty <= 0.0f || c.max_duty > 0.9f ||
         !finite(c.startup_timeout) || c.startup_timeout <= 0.0f ||
         (c.direction != 1 && c.direction != -1)) { s.failed = true; return false; }
+    const float margin = phase_voltage_margin(s, dt);
     for (unsigned i = 0; i < 3; ++i) {
-        if (!finite(voltage[i]) || voltage[i] < -0.5f || voltage[i] > bus + 0.5f ||
+        if (!phase_voltage_valid(voltage[i], bus, margin) ||
             !finite(current[i])) { s.failed = true; return false; }
     }
     if (s.failed) return false;
@@ -108,7 +122,9 @@ inline bool update(const Config &c, State &s, const float voltage[3],
             if (s.crossed && (freewheel ? after_crossing : emf > 0.0f)) s.positive_time += dt;
             else if (s.crossed) { s.positive_time = 0.0f; s.crossed = false; }
         }
-        if (s.crossed && s.positive_time >= 0.5f * s.period) commutate(s, c.direction, true);
+        // Select the ADC tick at/before the desired half-sector delay. Always
+        // rounding up adds a whole PWM tick when only ~5 ticks/sector remain.
+        if (s.crossed && s.positive_time + dt > 0.5f * s.period) commutate(s, c.direction, true);
         else if (!s.locked && s.sector_time >= s.period * 1.5f) {
             commutate(s, c.direction, false);
             const float ramp = bound((s.elapsed - 0.2f) / 3.0f, 0.0f, 1.0f);

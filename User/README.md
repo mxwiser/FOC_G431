@@ -11,7 +11,7 @@
 
 ## 目录分工
 
-- `setup.cpp`：调用各外设 `init()`、组织主循环，以及 ADC 缓冲/rank/校准/换算和 HAL 回调；回调逐项传入物理数值。
+- `setup.cpp`：调用各外设 `init()`、组织主循环和转发 HAL 回调。
 - `motor_mode.hpp`：稳定的模式编号。
 - `foc/motor_control.hpp`：控制模块对外入口；`initialize(period)` 初始化逻辑，`run()` 执行一次前台处理。
 - `foc/motor_state.hpp`：控制状态与固定存储；`state_machine_impl.hpp` 管理启停、保护和模式分派。
@@ -26,7 +26,8 @@
 - `app/communication_state.hpp`：协议状态和高速遥测的固定缓冲区。
 - `app/host_protocol_impl.hpp`：命令执行、确认、OBS 状态和 CUR 高速电流协议。
 - `board/uart_port_impl.hpp` / `board/uart_irq_impl.hpp`：STM32 UART2、DMA 与 HAL 回调，绑定到 data_port。
-- `board/adc_init.hpp` / `pwm_init.hpp` / `uart_init.hpp` / `system_init.hpp`：各外设初始化与板级时钟/等待操作，由 `setup()` 调用。
+- `board/adc_port_impl.hpp`：ADC 初始化、DMA 缓冲、rank 映射、零点校准和 A/V 换算；`read()` 返回物理数值。
+- `board/pwm_init.hpp` / `uart_init.hpp` / `system_init.hpp`：对应外设初始化与板级时钟/等待操作，由 `setup()` 调用。
 - `bldc/bldc.hpp`：无硬件依赖的六步表、反电动势换相、启动和线电流 PI。
 - `bldc/drive_impl.hpp`：BLDC 控制与共同状态机之间的连接。
 - `bldc/timer_output.hpp`：G431 三个桥臂的 PWM/强制低电平/悬空输出及 FOC 恢复。
@@ -40,8 +41,8 @@
 ## 可移植的数据接口
 
 控制输入头文件 `foc/motor_control.hpp` 不包含 STM32/HAL 类型。每一帧使用：
-`HAL_ADC_ConvCpltCallback` 直接调用下列输入函数；其参数都是量化、校准后的 `float`，
-原始 DMA 采样和换算直接放在 `setup.cpp`，控制输入函数不接收 ADC 缓冲区或 HAL 句柄。
+`HAL_ADC_ConvCpltCallback` 调用 `board_adc::read()` 取得量化、校准后的 `float`，在回调中逐项调用下列 setter。
+原始 DMA 采样和换算统一放在 `board/adc_port_impl.hpp`，控制输入函数不接收 ADC 缓冲区或 HAL 句柄。
 
 ```cpp
 motor_control::set_phase_currents(ia, ib);        // 已校准电流，A；Ic=-Ia-Ib
@@ -51,7 +52,7 @@ motor_control::adc_complete();                   // 提交完整一帧并执行�
 ```
 
 驱动错误调用 `motor_control::adc_error()`，也不传句柄。三个必需输入组都要在每帧提交，
-缺少任一组会停止控制，避免静默复用旧输入。原始 ADC 零点、饱和和校准处理留在 `setup.cpp`。
+缺少任一组会停止控制，避免静默复用旧输入。原始 ADC 零点、饱和和校准处理留在 `board`。
 `set_encoder_angle(electrical_radians)` 是可选的电角度输入，单位 rad；当前三个模式仍为
 无感模式，保存该输入不会自动切换到编码器控制。
 
