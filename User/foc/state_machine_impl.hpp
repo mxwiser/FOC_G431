@@ -16,7 +16,7 @@ void bridge_off()
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0u);
     prior_alpha = prior_beta = older_alpha = older_beta = 0.0f;
     iq_reference = 0.0f;
-    iq_voltage_limit = cfg::max_iq;
+    iq_voltage_limit = requested_current_limit();
     speed_reference = speed_elapsed = 0.0f;
 }
 
@@ -58,9 +58,8 @@ void retry_motor(MotorFault reason)
 bool limits_valid()
 {
     return foc_finite(cfg::current) && cfg::current >= 0.1f &&
-        foc_finite(cfg::max_iq) && cfg::max_iq > 0.0f &&
+        foc_finite(cfg::startup_current_scale) && cfg::startup_current_scale > 0.0f &&
         foc_finite(cfg::overcurrent) && cfg::overcurrent > cfg::current * 1.5f &&
-        cfg::overcurrent > cfg::max_iq * 1.5f &&
         foc_finite(cfg::min_bus) && cfg::min_bus > 0.0f &&
         foc_finite(cfg::max_bus) && cfg::max_bus > cfg::min_bus &&
         (cfg::direction == 1.0f || cfg::direction == -1.0f);

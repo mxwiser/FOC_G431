@@ -3,7 +3,7 @@
 void bldc_drive_sample()
 {
     if (!bldc_feedback_ready()) { motor_fail(BLDC_FEEDBACK_ERROR); return; }
-    iq_voltage_limit = cfg::max_iq;
+    iq_voltage_limit = requested_current_limit();
     if (current_mode) {
         iq_reference += clamp(cfg::direction * iq_setpoint - iq_reference,
                               cfg::iq_slew_per_second * sample_dt);

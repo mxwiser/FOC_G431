@@ -92,7 +92,7 @@ void sensorless_drive_sample()
         const float duty_magnitude = 1.7320508075688772f *
             foc_sqrt(prior_alpha * prior_alpha + prior_beta * prior_beta);
         const float duty = q_voltage < 0.0f ? -duty_magnitude : duty_magnitude;
-        const float maximum_current = current_mode ? cfg::max_iq : speed_current_limit;
+        const float maximum_current = current_mode ? cfg::startup_current_scale : speed_current_limit;
         vesc_startup_update(startup_config, startup, observer_phase, observer.speed,
                             startup_iq_filtered, maximum_current, duty, true, cfg::startup_manager_seconds);
         startup_elapsed -= cfg::startup_manager_seconds;

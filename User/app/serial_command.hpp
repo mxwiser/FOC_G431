@@ -7,7 +7,7 @@ enum SerialCommandType {
     SERIAL_SET_MOTOR_MODE, SERIAL_INVALID
 };
 struct SerialCommand { SerialCommandType type; float value; };
-struct SerialCommandParser { char text[24]; uint8_t length; bool discarding; };
+struct SerialCommandParser { char text[64]; uint8_t length; bool discarding; };
 
 // R/D/S are single characters; IQ=<A>, V=<rpm>, ILIM=<A>, M=<0|1|2> use CR/LF.
 // S also stops inside an incomplete/overlong command.

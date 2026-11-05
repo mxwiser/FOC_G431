@@ -25,7 +25,7 @@
 - `app/data_port.hpp` / `app/data_port.cpp`：无 HAL 依赖的收发接口、固定 RX 队列和错误事件。
 - `app/communication_state.hpp`：协议状态和高速遥测的固定缓冲区。
 - `app/host_protocol_impl.hpp`：命令执行、确认、OBS 状态和 CUR 高速电流协议。
-- `board/adc_state.hpp` / `board/adc_port_impl.hpp`：ADC 缓冲、零点校准、原始值换算与输入接口调用。
+- `board/adc_state.hpp` / `board/adc_port_impl.hpp`：ADC 缓冲、零点校准和原始值换算；返回 A/V 数值。
 - `board/uart_port_impl.hpp` / `board/uart_irq_impl.hpp`：STM32 UART2、DMA 与 HAL 回调，绑定到 data_port。
 - `bldc/bldc.hpp`：无硬件依赖的六步表、反电动势换相、启动和线电流 PI。
 - `bldc/drive_impl.hpp`：BLDC 控制与共同状态机之间的连接。
@@ -40,6 +40,8 @@
 ## 可移植的数据接口
 
 控制输入头文件 `foc/motor_control.hpp` 不包含 STM32/HAL 类型。每一帧使用：
+`HAL_ADC_ConvCpltCallback` 直接调用下列输入函数；其参数都是量化、校准后的 `float`，
+回调和控制输入函数都不传递 ADC 缓冲区或 HAL 句柄。
 
 ```cpp
 motor_control::set_phase_currents(ia, ib);        // 已校准电流，A；Ic=-Ia-Ib
@@ -109,6 +111,10 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 - 未连接时也显示算法区域；修改 Python 代码后需退出旧窗口并重新运行。
 - USART2：921600 / 8N1。
 - 原有 `R`、`S`、`D`、`IQ=`、`V=`、`ILIM=`、`PH=` 保留。
+- Iq、目标转速、速度模式限流值没有应用上限；固件与 Python 输入框均已取消 5 A/4000 rpm 限制。
+  仍要求有限、可用固件 float 表示的数值；原有下限和零值停止语义保留。
+  控制器跟踪用户目标，实际输出受母线电压/调制范围约束；过流、失锁等保护继续生效。
+  `FOC_STARTUP_CURRENT_SCALE` 只用于 FOC 启动速度归一化，不限制电流指令。
 - `M=` 仅允许 `IDLE`、无故障且没有自动重试意图时使用；其他状态返回 `cmd=4`。
 - `OBS` 增加 `drv=0/1/2` 和 `bfb=0/1`，分别为实际模式和相电压反馈是否新鲜。
 - `obs=O/M/B` 对应 Ortega、MXLEMMING、BLDC；BLDC 下 `id=0`，`iq` 为有符号线电流。
@@ -120,6 +126,7 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 ```text
 python matlab/tests/test_motor_modes.py
 python matlab/tests/test_data_ports.py
+python matlab/tests/test_command_ranges.py
 python matlab/tests/test_bldc_pwm_off.py
 python matlab/tests/test_bldc_startup.py
 python matlab/tests/test_adc_rank_sync.py

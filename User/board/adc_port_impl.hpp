@@ -1,10 +1,13 @@
 #pragma once
-// STM32 DMA and sensor calibration adapter. Only this file interprets raw ADC.
-static void board_adc_complete()
+// STM32 acquisition and calibration. Return physical values; HAL dispatch
+// forwards these by value through the public motor_control setters.
+namespace board_adc {
+struct QuantizedValues { float ia, ib, vu, vv, vw, bus; };
+
+static QuantizedValues read_quantized()
 {
 #if defined(STM32G431xx)
-    const uint32_t start = DWT->CYCCNT;
-    isr_start_cycle = start;
+    isr_start_cycle = DWT->CYCCNT;
 #endif
     const volatile uint16_t *samples = adc_buffer;
     const uint16_t a = samples[motor_adc::CURRENT_A], b = samples[motor_adc::CURRENT_B];
@@ -32,13 +35,16 @@ static void board_adc_complete()
             motor_control::input_error(motor_control::CURRENT_ADC_SATURATED);
         }
     }
-    motor_control::set_phase_currents(ia, ib);
-    motor_control::set_phase_voltages(motor_adc::phase_volts(u),
-                                    motor_adc::phase_volts(v), motor_adc::phase_volts(w));
-    motor_control::set_bus_voltage(motor_adc::bus_volts(bus));
-    motor_control::adc_complete();
+    const QuantizedValues values = {ia, ib, motor_adc::phase_volts(u),
+        motor_adc::phase_volts(v), motor_adc::phase_volts(w), motor_adc::bus_volts(bus)};
+    return values;
+}
+
+static void end_frame_timing()
+{
 #if defined(STM32G431xx)
-    const uint32_t cycles = DWT->CYCCNT - start;
+    const uint32_t cycles = DWT->CYCCNT - isr_start_cycle;
     if (cycles > isr_max_cycles) isr_max_cycles = cycles;
 #endif
 }
+} // namespace board_adc

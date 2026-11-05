@@ -112,8 +112,7 @@ recover_uart:
             const bool speed = command.type == SERIAL_SET_SPEED;
             const bool limit = command.type == SERIAL_SET_SPEED_LIMIT;
             const bool range_ok = speed ? (command.value == 0.0f ||
-                (command.value >= cfg::min_speed_rpm && command.value <= cfg::max_speed_rpm)) :
-                (command.value >= (limit ? 0.1f : 0.0f) && command.value <= cfg::max_iq);
+                command.value >= cfg::min_speed_rpm) : command.value >= (limit ? 0.1f : 0.0f);
             if (!foc_finite(command.value) || !range_ok) {
                 command_result = COMMAND_RANGE;
             } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
@@ -183,7 +182,7 @@ bool send_status()
     const float speed_limit = speed_current_limit;
     data_port::leave_critical(mask);
     int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.3f,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.3f,vset=%.1f,vref=%.1f,ilim=%.3f,ph=%u,ol=%d,obs=%c,drv=%u,bfb=%d",
+        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.7g,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.7g,vset=%.7g,vref=%.7g,ilim=%.7g,ph=%u,ol=%d,obs=%c,drv=%u,bfb=%d",
         static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
         speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
         r, l, flux, static_cast<unsigned long>(frames), angle,

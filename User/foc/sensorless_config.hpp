@@ -21,9 +21,9 @@
 #ifndef FOC_TEST_CURRENT
 #define FOC_TEST_CURRENT 1.0f
 #endif
-// Independent upper bound for user IQ= commands (A).
-#ifndef FOC_MAX_IQ
-#define FOC_MAX_IQ 5.0f
+// Current normalization for the sensorless startup helper, not a command limit.
+#ifndef FOC_STARTUP_CURRENT_SCALE
+#define FOC_STARTUP_CURRENT_SCALE 5.0f
 #endif
 #ifndef FOC_TRIP_CURRENT
 #define FOC_TRIP_CURRENT 30.0f
@@ -52,7 +52,7 @@ const float resistance = FOC_MOTOR_R;        // Ohms, phase resistance.
 const float inductance = FOC_MOTOR_L;        // H, phase inductance (Ld = Lq).
 const float flux_linkage = FOC_MOTOR_FLUX;   // Wb, phase PM flux linkage.
 const float current = FOC_TEST_CURRENT;     // A, parameter detection and default speed-mode limit.
-const float max_iq = FOC_MAX_IQ;            // A, maximum user IQ= command; independent of startup.
+const float startup_current_scale = FOC_STARTUP_CURRENT_SCALE; // A, startup speed normalization only.
 const float overcurrent = FOC_TRIP_CURRENT; // A, absolute phase-current trip.
 const float min_bus = FOC_MIN_BUS;
 const float max_bus = FOC_MAX_BUS;
@@ -73,7 +73,7 @@ const float run_current_bandwidth = FOC_RUN_CURRENT_BANDWIDTH; // rad/s; closed-
 // Reserve voltage for d-axis regulation before back EMF saturates the bridge.
 const float iq_voltage_derate_start = 0.75f;
 const float iq_voltage_derate_end = 0.85f;
-const float iq_voltage_derate_scale = 1.0f; // A per headroom interval; independent of IQ range.
+const float iq_voltage_derate_scale = 1.0f; // A, minimum current scale for voltage-headroom derating.
 const float align_seconds = 1.0f;           // 仅参数辨识的 Id 对齐使用。
 const float align_settle_grace = 0.5f;      // Release during alignment may need settling.
 const float ramp_seconds = 3.0f;
@@ -87,7 +87,6 @@ const float iq_slew_per_second = 2.0f;      // A/s for live current-mode changes
 // Positive speed magnitude, in the configured direction. Zero requests stop.
 const float default_speed_rpm = 150.0f;
 const float min_speed_rpm = 150.0f;         // Keep above the 76 rpm observer floor.
-const float max_speed_rpm = 4000.0f;
 const float speed_ramp_rpm_per_second = 500.0f;
 // Keep the proven low-speed slope; gradually approach VESC's default
 // 25000 ERPM/s (2500 mechanical rpm/s for this 10 pole-pair motor).

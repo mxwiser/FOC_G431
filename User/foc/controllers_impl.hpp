@@ -46,8 +46,13 @@ void update_iq_voltage_limit()
     const float range = maximum * (cfg::iq_voltage_derate_end - cfg::iq_voltage_derate_start);
     float fraction = (maximum * cfg::iq_voltage_derate_end - emf) / range;
     if (fraction < 0.0f) fraction = 0.0f;
-    iq_voltage_limit = fraction * cfg::iq_voltage_derate_scale;
-    if (iq_voltage_limit > cfg::max_iq) iq_voltage_limit = cfg::max_iq;
+    const float requested = requested_current_limit();
+    const float scale = requested > cfg::iq_voltage_derate_scale ? requested : cfg::iq_voltage_derate_scale;
+    // Follow the requested current ceiling without a fixed ampere cap. Keep
+    // voltage-headroom derating; bound the fraction before multiplying.
+    const float full_request = requested / scale;
+    if (fraction > full_request) fraction = full_request;
+    iq_voltage_limit = fraction * scale;
 }
 
 float speed_control_reference()

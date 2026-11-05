@@ -35,8 +35,9 @@ bool parameters_ready = false, detecting = false, bridge_started = false;
 volatile bool run_requested = false;
 bool current_mode = false;
 float iq_setpoint = cfg::current, iq_reference = 0.0f;
-float iq_voltage_limit = cfg::max_iq;
+float iq_voltage_limit = cfg::current;
 float speed_setpoint = cfg::default_speed_rpm, speed_current_limit = cfg::current;
+float requested_current_limit() { return current_mode ? iq_setpoint : speed_current_limit; }
 float speed_reference = 0.0f, speed_feedback = 0.0f, speed_elapsed = 0.0f;
 uint32_t retry_attempts = 0;
 MotorFault restart_reason = NO_FAULT;
