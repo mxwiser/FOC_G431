@@ -68,6 +68,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define VOL_ADC_U_Pin GPIO_PIN_4
+#define VOL_ADC_U_GPIO_Port GPIOA
+#define VLO_ADC_V_Pin GPIO_PIN_4
+#define VLO_ADC_V_GPIO_Port GPIOC
+#define VOL_ADC_W_Pin GPIO_PIN_11
+#define VOL_ADC_W_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_6
 #define LED_GPIO_Port GPIOC
 #define ENCODE_ZERO_Pin GPIO_PIN_8
