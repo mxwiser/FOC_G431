@@ -1,6 +1,8 @@
 #pragma once
 namespace motor_control {
-// Startup and foreground service. This function owns the main loop.
+// Initialize with the board's actual control period (seconds).
+void initialize(float sample_period_seconds);
+// One foreground service iteration; the board owns its main loop and wait.
 void run();
 // Set one coherent input frame in SI units, then call adc_complete() once.
 // Currents are calibrated amperes; Ic is reconstructed as -Ia-Ib.

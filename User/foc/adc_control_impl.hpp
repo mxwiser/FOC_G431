@@ -21,9 +21,6 @@ static void control_input_frame()
     // FOC 电流环和观测器保持使用同步 A/B 的两相 Clarke。
     clark_two_phase_ab(&I_a, &I_b, &I_alpha, &I_beta);
     if (motor_state == IDLE || motor_state == RETRY_WAIT) {
-#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
-        record_current_diagnostic();
-#endif
         return;
     }
     if (foc_abs(I_a) > cfg::overcurrent || foc_abs(I_b) > cfg::overcurrent ||
@@ -56,9 +53,6 @@ static void control_input_frame()
     }
     if (motor_mode == MOTOR_BLDC && !detecting && !bldc_feedback_ready()) motor_fail(BLDC_FEEDBACK_ERROR);
     if (motor_state != FAULT) control_sample();
-#if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
-    record_current_diagnostic();
-#endif
 }
 
 void motor_control::set_phase_currents(float ia, float ib)

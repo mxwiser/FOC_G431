@@ -2,7 +2,7 @@
 // Private implementation, included only by foc/motor_control_impl.hpp.
 
 #if defined(FOC_CURRENT_DIAG) && FOC_CURRENT_DIAG
-void record_current_diagnostic()
+void record_current_diagnostic(uint16_t raw_a, uint16_t raw_b, uint16_t raw_bus)
 {
     const bool timeout = diag_frame_deadline &&
         static_cast<int32_t>(sample_frames - diag_frame_deadline) >= 0;
@@ -11,9 +11,9 @@ void record_current_diagnostic()
         diag_stride && sample_frames % diag_stride == 0) {
         CurrentDiagnosticSample &r = current_diag[diag_count % 192u];
         r.frame = sample_frames; r.state = motor_state;
-        r.raw_a = adc_buffer[0]; r.raw_b = adc_buffer[1];
+        r.raw_a = raw_a; r.raw_b = raw_b;
         r.raw_c = 0xffffu; // No C-phase ADC sample; r.ic contains the A/B reconstruction.
-        r.raw_bus = adc_buffer[motor_adc::BUS];
+        r.raw_bus = raw_bus;
         r.ia = I_a; r.ib = I_b; r.ic = I_c; r.id = I_d; r.iq = I_q;
         r.iqref = iq_reference; r.phase = electrical_angle;
         r.observer_phase = observer_phase; r.speed = observer.speed;

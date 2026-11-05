@@ -11,12 +11,12 @@
 
 ## 目录分工
 
-- `setup.cpp`：启动调用和 ADC HAL 回调；在硬件边界判断句柄，控制模块不接收句柄。
+- `setup.cpp`：调用各外设 `init()`、组织主循环，以及 ADC 缓冲/rank/校准/换算和 HAL 回调；回调逐项传入物理数值。
 - `motor_mode.hpp`：稳定的模式编号。
-- `foc/motor_control.hpp`：控制模块对外入口；`motor_control_impl.hpp` 组织初始化和前台循环。
+- `foc/motor_control.hpp`：控制模块对外入口；`initialize(period)` 初始化逻辑，`run()` 执行一次前台处理。
 - `foc/motor_state.hpp`：控制状态与固定存储；`state_machine_impl.hpp` 管理启停、保护和模式分派。
 - `foc/controllers_impl.hpp`：控制器初始化、速度环及电压裕量限流。
-- `foc/adc_sampling.hpp`：当前板的 ADC rank、DMA 下标和电压换算；`adc_control_impl.hpp` 只消费 SI 输入帧。
+- `foc/adc_control_impl.hpp`：只消费 SI 输入帧，不访问 ADC DMA 缓冲或原始通道。
 - `foc/drive_impl.hpp`：FOC 电流环、SVPWM 输出和无感启动。
 - `foc/parameter_detection_impl.hpp`：FOC 的 R/L/磁链辨识。
 - `foc/foc_math.cpp`：坐标变换、观测器共同校验和 PLL，分派到两种独立观测器。
@@ -25,8 +25,8 @@
 - `app/data_port.hpp` / `app/data_port.cpp`：无 HAL 依赖的收发接口、固定 RX 队列和错误事件。
 - `app/communication_state.hpp`：协议状态和高速遥测的固定缓冲区。
 - `app/host_protocol_impl.hpp`：命令执行、确认、OBS 状态和 CUR 高速电流协议。
-- `board/adc_state.hpp` / `board/adc_port_impl.hpp`：ADC 缓冲、零点校准和原始值换算；返回 A/V 数值。
 - `board/uart_port_impl.hpp` / `board/uart_irq_impl.hpp`：STM32 UART2、DMA 与 HAL 回调，绑定到 data_port。
+- `board/adc_init.hpp` / `pwm_init.hpp` / `uart_init.hpp` / `system_init.hpp`：各外设初始化与板级时钟/等待操作，由 `setup()` 调用。
 - `bldc/bldc.hpp`：无硬件依赖的六步表、反电动势换相、启动和线电流 PI。
 - `bldc/drive_impl.hpp`：BLDC 控制与共同状态机之间的连接。
 - `bldc/timer_output.hpp`：G431 三个桥臂的 PWM/强制低电平/悬空输出及 FOC 恢复。
@@ -41,7 +41,7 @@
 
 控制输入头文件 `foc/motor_control.hpp` 不包含 STM32/HAL 类型。每一帧使用：
 `HAL_ADC_ConvCpltCallback` 直接调用下列输入函数；其参数都是量化、校准后的 `float`，
-回调和控制输入函数都不传递 ADC 缓冲区或 HAL 句柄。
+原始 DMA 采样和换算直接放在 `setup.cpp`，控制输入函数不接收 ADC 缓冲区或 HAL 句柄。
 
 ```cpp
 motor_control::set_phase_currents(ia, ib);        // 已校准电流，A；Ic=-Ia-Ib
@@ -51,7 +51,7 @@ motor_control::adc_complete();                   // 提交完整一帧并执行�
 ```
 
 驱动错误调用 `motor_control::adc_error()`，也不传句柄。三个必需输入组都要在每帧提交，
-缺少任一组会停止控制，避免静默复用旧输入。原始 ADC 零点、饱和和校准处理留在 board 层。
+缺少任一组会停止控制，避免静默复用旧输入。原始 ADC 零点、饱和和校准处理留在 `setup.cpp`。
 `set_encoder_angle(electrical_radians)` 是可选的电角度输入，单位 rad；当前三个模式仍为
 无感模式，保存该输入不会自动切换到编码器控制。
 
@@ -61,7 +61,8 @@ motor_control::adc_complete();                   // 提交完整一帧并执行�
 
 `app/data_port.cpp` 作为独立编译单元参与构建，`setup.cpp` 不包含 `.cpp` 文件。
 当前 EIDE 工程会自动收集该源文件；其他构建系统也应将它加入源文件列表。
-PWM 输出和启动初始化仍有本板适配内容，移植时也需对应处理。
+板级时钟、运放/ADC/DMA/串口/采样 PWM 启动和 `__WFI()` 位于 `board` 对应文件，由 `setup.cpp` 调用；
+控制模块通过 data_port 时钟做前台超时处理。PWM 输出驱动仍需按目标板适配。
 
 ## ADC 数据排列与 BLDC 接入
 

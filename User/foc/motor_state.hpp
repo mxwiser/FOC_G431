@@ -17,6 +17,7 @@ enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
 volatile MotorState motor_state = ZERO;
 volatile MotorFault motor_fault = NO_FAULT;
 volatile uint32_t sample_frames = 0;
+uint32_t service_last_frame = 0, service_last_adc = 0, service_last_status = 0;
 volatile uint32_t isr_max_cycles = 0;
 volatile uint32_t observer_max_cycles = 0, current_max_cycles = 0, pwm_max_cycles = 0;
 volatile uint32_t pwm_write_max_cycles = 0;
@@ -54,6 +55,9 @@ bldc::State bldc_state = {};
 float bldc_phase_voltage[3] = {};
 uint32_t bldc_feedback_frame = 0;
 bool bldc_feedback_published = false;
+// Preserve the first rejected active BLDC frame; later idle samples keep arriving.
+struct BldcFeedbackFaultCapture { float phase[3], bus; uint32_t frame; };
+BldcFeedbackFaultCapture bldc_feedback_fault_capture = {};
 bool bldc_feedback_ready() {
     return bldc_feedback_published && sample_frames - bldc_feedback_frame <= 2u;
 }
