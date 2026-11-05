@@ -146,7 +146,7 @@ recover_uart:
 bool send_status()
 {
     if (!data_port::tx_ready()) return false;
-    static char text[448]; // Persistent until the interrupt-driven TX completes.
+    static TelemetryText text; // Persistent until the interrupt-driven TX completes.
     const uint32_t mask = data_port::enter_critical();
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
     const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
@@ -181,40 +181,32 @@ bool send_status()
         cfg::direction * speed_reference * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS);
     const float speed_limit = speed_current_limit;
     data_port::leave_critical(mask);
-    int length = snprintf(text, sizeof(text),
-        "OBS,s=%d,f=%d,udc=%.3f,ia=%.4f,id=%.4f,iq=%.4f,rpm=%.2f,ready=%d,params=%d,R=%.6f,L=%.9f,flux=%.8f,n=%lu,angle=%.3f,isr=%lu,pwm=%lu,mode=%c,iqset=%.7g,iqref=%.3f,auto=%d,retry=%lu,why=%d,cmd=%d,iqcap=%.7g,vset=%.7g,vref=%.7g,ilim=%.7g,ph=%u,ol=%d,obs=%c,drv=%u,bfb=%d",
-        static_cast<int>(state), static_cast<int>(fault), bus, ia, id, iq,
-        speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), locked ? 1 : 0, ready ? 1 : 0,
-        r, l, flux, static_cast<unsigned long>(frames), angle,
-        static_cast<unsigned long>(cycles), static_cast<unsigned long>(write_cycles),
-        mode ? 'I' : 'S', target_iq, reference_iq, armed ? 1 : 0,
-        static_cast<unsigned long>(retries), static_cast<int>(reason), static_cast<int>(result), iq_cap,
-        target_rpm, reference_rpm, speed_limit, static_cast<unsigned>(phases), forced_phase ? 1 : 0,
-        observer_type, drive, feedback ? 1 : 0);
-    if (length <= 0 || length >= static_cast<int>(sizeof(text))) return false;
-    const char *names[] = {",i_a=%.4f", ",i_b=%.4f", ",i_c=%.4f"};
+    text.reset("OBS");
+    text.integer("s", state); text.integer("f", fault);
+    text.real("udc", bus, 3); text.real("ia", ia, 4);
+    text.real("id", id, 4); text.real("iq", iq, 4);
+    text.real("rpm", speed * 60.0f / (2.0f * kPi * FOC_POLE_PAIRS), 2);
+    text.integer("ready", locked ? 1u : 0u); text.integer("params", ready ? 1u : 0u);
+    text.real("R", r, 6); text.real("L", l, 9); text.real("flux", flux, 8);
+    text.integer("n", frames); text.real("angle", angle, 3);
+    text.integer("isr", cycles); text.integer("pwm", write_cycles);
+    text.letter("mode", mode ? 'I' : 'S'); text.significant("iqset", target_iq);
+    text.real("iqref", reference_iq, 3); text.integer("auto", armed ? 1u : 0u);
+    text.integer("retry", retries); text.integer("why", reason); text.integer("cmd", result);
+    text.significant("iqcap", iq_cap); text.significant("vset", target_rpm);
+    text.significant("vref", reference_rpm); text.significant("ilim", speed_limit);
+    text.integer("ph", phases); text.integer("ol", forced_phase ? 1u : 0u);
+    text.letter("obs", observer_type); text.integer("drv", drive);
+    text.integer("bfb", feedback ? 1u : 0u);
+    const char *names[] = {"i_a", "i_b", "i_c"};
     const float values[] = {phase_a, phase_b, phase_c};
     for (unsigned i = 0; i < 3; ++i) {
         if (!(phases & (1u << i))) continue;
-        const int added = snprintf(text + length, sizeof(text) - length, names[i], values[i]);
-        if (added < 0 || added >= static_cast<int>(sizeof(text) - length)) return false;
-        length += added;
+        text.real(names[i], values[i], 4);
     }
-    if (length + 2 >= static_cast<int>(sizeof(text))) return false;
-    text[length++] = '\r'; text[length++] = '\n';
-    return data_port::write(reinterpret_cast<const uint8_t *>(text), static_cast<uint16_t>(length));
-}
-
-// Append a signed decimal field to a bounded, fixed-size packet.
-void append_phase_number(char *text, unsigned &length, int32_t number)
-{
-    text[length++] = ',';
-    uint32_t magnitude;
-    if (number < 0) { text[length++] = '-'; magnitude = static_cast<uint32_t>(-number); }
-    else magnitude = static_cast<uint32_t>(number);
-    char digits[10]; unsigned count = 0;
-    do { digits[count++] = static_cast<char>('0' + magnitude % 10u); magnitude /= 10u; } while (magnitude);
-    while (count) text[length++] = digits[--count];
+    text.finish();
+    return text.valid && data_port::write(reinterpret_cast<const uint8_t *>(text.data),
+                                         static_cast<uint16_t>(text.length));
 }
 
 void send_phase_samples()
@@ -225,26 +217,21 @@ void send_phase_samples()
     const uint8_t available = (phase_write - read) & 127u;
     if (!selected || available < 16u) return;
     // Worst case: 16 * 3 * 7 bytes plus header, < 448 bytes.
-    static char text[448];
-    unsigned length = 3; text[0] = 'C'; text[1] = 'U'; text[2] = 'R';
+    static TelemetryText text;
     const uint32_t first_frame = phase_samples[read].frame;
-    // Frame/drop are encoded as unsigned decimals (cast avoids signed rollover).
-    const int header = snprintf(text, sizeof(text), "CUR,%lu,%u,%lu,%lu",
-        static_cast<unsigned long>(first_frame), static_cast<unsigned>(selected),
-        static_cast<unsigned long>(phase_dropped),
-        static_cast<unsigned long>(sample_dt * 1000000000.0f + 0.5f));
-    if (header <= 0 || header >= static_cast<int>(sizeof(text))) return;
-    length = static_cast<unsigned>(header);
+    text.reset("CUR,"); text.number(first_frame); text.character(','); text.number(selected);
+    text.character(','); text.number(phase_dropped); text.character(',');
+    text.number(static_cast<uint32_t>(sample_dt * 1000000000.0f + 0.5f));
     for (unsigned i = 0; i < 16u; ++i) {
         const PhaseSample &sample = phase_samples[read];
         // A full ring causes missed frames: terminate the batch before the gap.
         if (sample.frame != first_frame + i * kPhaseStride) break;
-        if (selected & 1u) append_phase_number(text, length, sample.a);
-        if (selected & 2u) append_phase_number(text, length, sample.b);
-        if (selected & 4u) append_phase_number(text, length, sample.c);
+        if (selected & 1u) { text.character(','); text.signed_number(sample.a); }
+        if (selected & 2u) { text.character(','); text.signed_number(sample.b); }
+        if (selected & 4u) { text.character(','); text.signed_number(sample.c); }
         read = (read + 1u) & 127u;
     }
-    text[length++] = '\r'; text[length++] = '\n';
-    if (data_port::write(reinterpret_cast<const uint8_t *>(text),
-                         static_cast<uint16_t>(length))) phase_read = read;
+    text.finish();
+    if (text.valid && data_port::write(reinterpret_cast<const uint8_t *>(text.data),
+                                      static_cast<uint16_t>(text.length))) phase_read = read;
 }

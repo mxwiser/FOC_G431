@@ -10,6 +10,7 @@
 #include "vesc_startup.hpp"
 #include "../app/serial_command.hpp"
 #include "../app/data_port.hpp"
+#include "../app/telemetry_text.hpp"
 #include "../motor_mode.hpp"
 #include "../bldc/bldc.hpp"
 #include "../bldc/phase_feedback.hpp"
