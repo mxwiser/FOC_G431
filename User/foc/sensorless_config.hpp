@@ -87,8 +87,8 @@ const float iq_slew_per_second = 2.0f;      // A/s for live current-mode changes
 // Positive speed magnitude, in the configured direction. Zero requests stop.
 const float default_speed_rpm = 150.0f;
 const float min_speed_rpm = 150.0f;         // Keep above the 76 rpm observer floor.
-// VESC default: fixed 25000 ERPM/s for both acceleration and deceleration.
-const float speed_ramp_rpm_per_second = 25000.0f / FOC_POLE_PAIRS;
+// VESC default: fixed 35000 ERPM/s for both acceleration and deceleration.
+const float speed_ramp_rpm_per_second = 55000.0f / FOC_POLE_PAIRS;
 const float bldc_startup_speed_ramp_rpm_per_second = 500.0f; // Before BEMF lock only.
 const float speed_loop_seconds = 0.001f;   // ~1 kHz; uses actual elapsed sample time.
 const float speed_filter_seconds = 0.01f;
