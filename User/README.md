@@ -125,6 +125,9 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 - `OBS` 增加 `drv=0/1/2` 和 `bfb=0/1`，分别为实际模式和相电压反馈是否新鲜。
 - `obs=O/M/B` 对应 Ortega、MXLEMMING、BLDC；BLDC 下 `id=0`，`iq` 为有符号线电流。
 - 仍使用 `mode=I/S` 表示电流/速度控制，与算法选择 `drv` 分开。
+- 速度环允许负转矩电流制动，FOC 和 BLDC 都受 `ILIM` 的正负幅值限制，电流变化率为 100 A/s。
+  正向转矩仍受反电动势电压裕量限制；该降额不禁止负向制动。转速参考斜坡保持原配置。
+  制动会向母线回送能量，默认母线高于 30 V 时触发保护；当前没有完整的电池回充电流/BMS 限制。
 - 界面根据固件确认更新当前算法，运行时锁定切换，状态超时禁用控制；停止按钮保持可用。
 
 ## 验证入口
@@ -133,6 +136,7 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 python matlab/tests/test_motor_modes.py
 python matlab/tests/test_data_ports.py
 python matlab/tests/test_command_ranges.py
+python matlab/tests/test_speed_braking.py
 python matlab/tests/test_bldc_pwm_off.py
 python matlab/tests/test_bldc_startup.py
 python matlab/tests/test_bldc_commutation_transient.py

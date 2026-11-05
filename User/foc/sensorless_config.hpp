@@ -32,7 +32,7 @@
 #define FOC_MIN_BUS 8.0f
 #endif
 #ifndef FOC_MAX_BUS
-#define FOC_MAX_BUS 24.0f
+#define FOC_MAX_BUS 30.0f
 #endif
 #ifndef FOC_SENSORLESS_DIRECTION
 #define FOC_SENSORLESS_DIRECTION 1.0f
@@ -95,8 +95,10 @@ const float speed_ramp_fast_start_rpm = 500.0f;
 const float speed_ramp_fast_full_rpm = 1500.0f;
 const float speed_loop_seconds = 0.001f;   // ~1 kHz; uses actual elapsed sample time.
 const float speed_filter_seconds = 0.01f;
-const float speed_iq_slew_per_second = 20.0f; // Load rejection; separate from manual IQ ramp.
-// PI input: electrical rad/s error; output: forward Iq in amperes.
+// Fast torque sign changes keep the signed speed loop from oscillating under
+// load release/braking. Independent of the manual IQ command ramp.
+const float speed_iq_slew_per_second = 100.0f;
+// PI input: electrical rad/s error; output: signed torque current in amperes.
 const float speed_kp = current * 0.3f / openloop_rad_s;
 const float speed_ki = speed_kp * 5.0f;
 }

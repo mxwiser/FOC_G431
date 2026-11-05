@@ -77,18 +77,26 @@ float speed_control_reference()
         speed_reference += clamp(speed_setpoint * rpm_to_electrical - speed_reference,
             ramp * rpm_to_electrical * elapsed);
         pi_speed.dt = elapsed;
-        pi_speed.output_limit = limit;
+        // ILIM bounds both motoring and braking. The back-EMF headroom
+        // derating limits positive torque; it must not suppress braking.
+        pi_speed.output_limit = speed_current_limit;
         pi_speed.input = speed_reference - speed_feedback;
+        const float previous_integral = clamp(pi_speed.integral, speed_current_limit);
         calculate_PI(&pi_speed);
-        // Forward torque only: deceleration coasts, avoiding regenerative bus rise.
-        if (pi_speed.integral < 0.0f) pi_speed.integral = 0.0f;
-        if (pi_speed.output < 0.0f) pi_speed.output = 0.0f;
+        // Keep PI anti-windup at the asymmetric positive voltage limit,
+        // while retaining negative integral/output for regenerative torque.
+        if (pi_speed.output > limit && pi_speed.input > 0.0f) {
+            pi_speed.integral = previous_integral;
+            pi_speed.output = clamp(pi_speed.kp * pi_speed.input + pi_speed.integral,
+                                    speed_current_limit);
+        }
+        if (pi_speed.output > limit) pi_speed.output = limit;
     }
     // The current loop remains at the ADC rate. Clamp rapidly if headroom shrinks.
     float reference = cfg::direction * iq_reference;
     const float target = pi_speed.output < limit ? pi_speed.output : limit;
     reference += clamp(target-reference,cfg::speed_iq_slew_per_second * sample_dt);
     if (reference > limit) reference = limit;
-    if (reference < 0.0f) reference = 0.0f;
+    if (reference < -speed_current_limit) reference = -speed_current_limit;
     return cfg::direction * reference;
 }

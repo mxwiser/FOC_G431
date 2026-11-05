@@ -71,7 +71,7 @@ inline void commutate(State &s, int direction, bool measured) {
 inline bool update(const Config &c, State &s, const float voltage[3],
                    const float current[3], float bus, float reference, float dt) {
     if (!finite(bus) || bus <= 0.0f || !finite(dt) || dt <= 0.0f || dt > 0.001f ||
-        !finite(reference) || reference < 0.0f ||
+        !finite(reference) ||
         !finite(c.resistance) || c.resistance <= 0.0f ||
         !finite(c.inductance) || c.inductance <= 0.0f ||
         !finite(c.flux) || c.flux <= 0.0f || !finite(c.max_duty) ||
@@ -134,6 +134,9 @@ inline bool update(const Config &c, State &s, const float voltage[3],
     }
     // A scalar line-current PI. The negative leg conducts at the ADC trigger;
     // unlike FOC, there is no d/q current here. R_line=2R, L_line=2L.
+    // Reference is signed relative to the configured commutation direction.
+    // Negative current brakes a rotating motor by regulating voltage below
+    // its back EMF; keep the same sector sequence and nonnegative duty.
     const float measured = -current[sampled_phase.sink];
     s.current += dt / (0.001f + dt) * (measured - s.current);
     const float error = reference - s.current;
