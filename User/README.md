@@ -102,6 +102,10 @@ BLDC 的线电流 PI 由积分项建立反电动势所需电压，不在锁定�
 
 BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 相电压输入无效或停止发布时保留 `cmd=6` / `f=13` 的反馈保护。
+换相后的前两个采样周期（当前 80 us）允许相电压短时到母线 +2 V，并继续消隐过零检测；
+其他时间保持母线 +0.5 V 检查。2 V 是本板实测瞬态的余量，不是 VESC 默认值。
+超出瞬态余量、持续越界、非有限值和反馈过期仍触发保护；首次越界帧保存在固定诊断记录中。
+高转速时按 ADC 时基向下选择半扇区延时，避免向上取整多等待一整个 PWM 周期。
 本次按现有配置解析采样，保留用户的 ADC/PWM 触发时序，没有修改 `.ioc`、`Core`、
 `Drivers` 或 Keil 工程。BLDC 的实际相序、PWM 采样窗口和换相仍需实机验证，
 主机信号测试不代表已经完成带载调试。
@@ -131,6 +135,7 @@ python matlab/tests/test_data_ports.py
 python matlab/tests/test_command_ranges.py
 python matlab/tests/test_bldc_pwm_off.py
 python matlab/tests/test_bldc_startup.py
+python matlab/tests/test_bldc_commutation_transient.py
 python matlab/tests/test_adc_rank_sync.py
 python matlab/tests/test_clark_two_phase.py
 python matlab/tests/test_startup_regression.py
