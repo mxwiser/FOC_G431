@@ -4,6 +4,7 @@
 enum CommandResult { COMMAND_NONE, COMMAND_OK, COMMAND_FORMAT, COMMAND_RANGE, COMMAND_BUSY, COMMAND_RX,
     COMMAND_FEEDBACK, COMMAND_UNSUPPORTED };
 CommandResult command_result = COMMAND_NONE;
+CommandResult music_command_result = COMMAND_NONE;
 SerialCommandParser command_parser = {};
 // Telemetry selection only; ADC sampling remains active for FOC and protection.
 volatile uint8_t phase_telemetry_mask = 0u;

@@ -53,7 +53,7 @@ void current_control(float angle, float target_d, float target_q)
     pi_d.input = target_d - I_d; pi_q.input = target_q - I_q;
     calculate_PI(&pi_d); calculate_PI(&pi_q);
     float U_d = pi_d.output, U_q = pi_q.output;
-    if (!detecting && motor_state != ALIGN && motor_flux > 0.0f) {
+    if (!detecting && motor_state != ALIGN && motor_state != MUSIC && motor_flux > 0.0f) {
         // VESC-style cross-coupling and back-EMF feedforward. Important when
         // R and L are small: PI alone reacts too late during acceleration.
         float speed = motor_state == OPEN_LOOP && !detecting && !startup.phase_override
@@ -71,7 +71,7 @@ void current_control(float angle, float target_d, float target_q)
     const float limited_d = clamp(U_d, maximum);
     const float q_budget_sq = maximum * maximum - limited_d * limited_d;
     const float limited_q = clamp(U_q, foc_sqrt(q_budget_sq > 0.0f ? q_budget_sq : 0.0f));
-    if (!current_mode && !detecting && cfg::direction * target_q > 0.0f &&
+    if (!current_mode && !detecting && motor_state != MUSIC && cfg::direction * target_q > 0.0f &&
         cfg::direction * (U_q - limited_q) > 0.0f) speed_voltage_limited = true;
     pi_d.integral += limited_d - U_d;
     pi_q.integral += limited_q - U_q;

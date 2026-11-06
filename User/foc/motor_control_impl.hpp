@@ -8,6 +8,7 @@
 #include "svpwm.h"
 #include "vesc_observer.hpp"
 #include "vesc_startup.hpp"
+#include "music_tone.hpp"
 #include "../app/serial_command.hpp"
 #include "../app/data_port.hpp"
 #include "../app/telemetry_text.hpp"
@@ -55,5 +56,5 @@ void motor_control::run()
     service_restart();
     if (now - service_last_status >= 20u) {
         if (send_status()) service_last_status = now;
-    } else send_phase_samples();
+    } else if (!send_music_status(now)) send_phase_samples();
 }

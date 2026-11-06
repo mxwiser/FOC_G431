@@ -9,7 +9,8 @@ VescObserverType motor_observer_type() {
 }
 const float kPi = 3.14159265358979323846f;
 enum MotorState { ZERO, IDLE, BOOTSTRAP, DETECT_R, DETECT_L,
-    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND /* 旧协议保留值，正常启动不再经过此状态 */, RUN, FAULT, RETRY_WAIT };
+    ALIGN, OPEN_LOOP, DETECT_FLUX, BLEND /* 旧协议保留值，正常启动不再经过此状态 */, RUN, FAULT, RETRY_WAIT,
+    MUSIC }; // 12: fixed-coordinate AC-current test; never auto-restarts.
 enum MotorFault { NO_FAULT, BAD_ZERO, OVERCURRENT, ADC_ERROR, ADC_TIMEOUT,
     BAD_BUS, BAD_CONFIG, ALIGN_FAILED, STARTUP_TIMEOUT,
     LOST_LOCK, DETECT_FAILED, NUMERIC_ERROR, PWM_ERROR, BLDC_FEEDBACK_ERROR };
@@ -33,6 +34,10 @@ float motor_resistance = cfg::resistance;
 float motor_inductance = cfg::inductance;
 float motor_flux = cfg::flux_linkage;
 bool parameters_ready = false, detecting = false, bridge_started = false;
+music_tone::Player music_player = {};
+volatile bool music_requested = false, music_status_pending = false;
+uint32_t service_last_music = 0u;
+volatile uint32_t music_last_command_ms = 0u;
 volatile bool run_requested = false;
 bool current_mode = false;
 float iq_setpoint = cfg::current, iq_reference = 0.0f;

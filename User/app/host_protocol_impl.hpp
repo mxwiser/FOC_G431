@@ -80,6 +80,21 @@ recover_uart:
         if (command.type == SERIAL_STOP) service_command('S');
         else if (command.type == SERIAL_START) service_command('R');
         else if (command.type == SERIAL_DETECT) service_command('D');
+        else if (command.type == SERIAL_MUSIC_STATUS) {
+            music_status_pending = true;
+            if (music_requested) music_last_command_ms = data_port::milliseconds();
+        }
+        else if (command.type == SERIAL_MUSIC_NOTE) {
+            music_tone::Note note;
+            if (!music_tone::make_note(command.value, command.amplitude, command.duration_ms, sample_dt, note))
+                command_result = COMMAND_RANGE;
+            else if (motor_mode == MOTOR_BLDC) command_result = COMMAND_UNSUPPORTED;
+            else if ((!music_requested && !start_motor(false, true)) ||
+                     !music_tone::enqueue(music_player, note)) command_result = COMMAND_BUSY;
+            else { command_result = COMMAND_OK; music_last_command_ms = data_port::milliseconds(); }
+            music_command_result = command_result;
+            music_status_pending = true;
+        }
         else if (command.type == SERIAL_SET_MOTOR_MODE) {
             if (!foc_finite(command.value) || command.value < 0.0f || command.value > 2.0f ||
                 command.value != static_cast<float>(static_cast<unsigned>(command.value))) {
@@ -115,7 +130,8 @@ recover_uart:
                 command.value >= cfg::min_speed_rpm) : command.value >= (limit ? 0.1f : 0.0f);
             if (!foc_finite(command.value) || !range_ok) {
                 command_result = COMMAND_RANGE;
-            } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO)) {
+            } else if (motor_state == FAULT || (detecting && motor_state != IDLE && motor_state != ZERO) ||
+                       (music_requested && !((command.type == SERIAL_SET_IQ || speed) && command.value == 0.0f))) {
                 command_result = COMMAND_BUSY;
             } else {
                 const uint32_t mask = data_port::enter_critical();
@@ -160,6 +176,32 @@ recover_uart:
     if (rx.overflow || rx.error) goto recover_uart;
 }
 
+bool send_music_status(uint32_t now)
+{
+    if ((!music_status_pending && (!music_requested || now - service_last_music < 20u)) ||
+        !data_port::tx_ready()) return false;
+    static TelemetryText text;
+    const uint32_t mask = data_port::enter_critical();
+    const uint32_t ack = music_player.accepted, done = music_player.completed;
+    const unsigned free = music_tone::capacity - music_player.count;
+    const bool active = music_requested;
+    const MotorState state = motor_state;
+    const MotorFault fault = motor_fault;
+    const CommandResult result = music_command_result;
+    music_status_pending = false;
+    data_port::leave_critical(mask);
+    text.reset("MUS"); text.integer("v", 1u); text.integer("ack", ack);
+    text.integer("done", done); text.integer("free", free); text.integer("active", active ? 1u : 0u);
+    text.integer("cmd", result); text.integer("s", state); text.integer("f", fault);
+    text.finish();
+    if (!text.valid || !data_port::write(reinterpret_cast<const uint8_t *>(text.data),
+                                       static_cast<uint16_t>(text.length))) {
+        music_status_pending = true; return false;
+    }
+    service_last_music = now;
+    return true;
+}
+
 bool send_status()
 {
     if (!data_port::tx_ready()) return false;
@@ -168,7 +210,7 @@ bool send_status()
     const MotorState state = motor_state; const MotorFault fault = motor_fault;
     const bool inactive = state == IDLE || state == ZERO || state == RETRY_WAIT;
     const float bus = Udc_quant, id = inactive ? 0.0f : I_d, iq = inactive ? 0.0f : I_q;
-    const float speed = inactive ? 0.0f : motor_speed();
+    const float speed = inactive || music_requested ? 0.0f : motor_speed();
     const float r = motor_resistance, l = motor_inductance, flux = motor_flux, ia = I_alpha;
     // Same ADC frame, before Clarke/Park or observer filtering. Keep the
     // legacy ia=Ialpha field for existing serial clients; i_a/i_b/i_c are phases.
@@ -179,17 +221,18 @@ bool send_status()
     const float angle = electrical_angle;
     const uint32_t cycles = isr_max_cycles, write_cycles = pwm_write_max_cycles;
     const bool ready = parameters_ready;
-    const bool locked = !inactive && motor_fault == NO_FAULT &&
+    const bool locked = !inactive && !music_requested && motor_fault == NO_FAULT &&
         (motor_mode == MOTOR_BLDC ? bldc_state.locked : observer.ready);
-    const bool forced_phase = !inactive && !detecting &&
-        (motor_mode == MOTOR_BLDC ? !bldc_state.locked : startup.phase_override);
+    const bool forced_phase = music_requested || (!inactive && !detecting &&
+        (motor_mode == MOTOR_BLDC ? !bldc_state.locked : startup.phase_override));
     const char observer_type = motor_mode == MOTOR_BLDC ? 'B' :
         (observer_config.type == VESC_OBSERVER_MXLEMMING_LAMBDA_COMP ? 'M' : 'O');
     const unsigned drive = static_cast<unsigned>(motor_mode);
     const bool feedback = bldc_feedback_ready();
     const uint32_t frames = sample_frames;
-    const float target_iq = iq_setpoint, reference_iq = iq_reference, iq_cap = iq_voltage_limit;
-    const bool mode = current_mode, armed = run_requested;
+    const float target_iq = music_requested ? music_player.current.amplitude : iq_setpoint;
+    const float reference_iq = iq_reference, iq_cap = music_requested ? music_tone::max_amplitude : iq_voltage_limit;
+    const bool mode = current_mode || music_requested, armed = run_requested;
     const uint32_t retries = retry_attempts;
     const MotorFault reason = restart_reason;
     const CommandResult result = command_result;

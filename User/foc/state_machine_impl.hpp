@@ -10,6 +10,9 @@ float clamp(float value, float limit)
 
 void bridge_off()
 {
+    if (music_requested) music_status_pending = true;
+    music_requested = false;
+    music_tone::clear(music_player);
     __HAL_TIM_MOE_DISABLE_UNCONDITIONALLY(&htim1);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0u);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0u);
@@ -84,13 +87,33 @@ void control_sample()
     state_time = ++state_samples * sample_dt;
     if (motor_state == BOOTSTRAP) {
         if (state_time >= 0.005f) {
-            if (detecting) { detect_voltage = 0.0f; detect_stage = 0; enter_state(DETECT_R); }
+            if (music_requested) {
+                configure_controllers(); openloop_speed = 0.0f;
+                enter_state(MUSIC);
+            } else if (detecting) { detect_voltage = 0.0f; detect_stage = 0; enter_state(DETECT_R); }
             else {
                 configure_controllers(); openloop_angle = openloop_speed = 0.0f;
                 bldc::reset(bldc_state);
                 enter_state(OPEN_LOOP);
             }
         }
+        return;
+    }
+    if (motor_state == MUSIC) {
+        if (data_port::milliseconds() - music_last_command_ms > 1000u) {
+            music_command_result = command_result = COMMAND_RX;
+            bridge_off(); coast_until = data_port::milliseconds() + 2000u; enter_state(IDLE);
+            return;
+        }
+        float phase, amplitude;
+        if (!music_tone::next(music_player, phase, amplitude)) {
+            bridge_off(); coast_until = data_port::milliseconds() + 2000u; enter_state(IDLE);
+            return;
+        }
+        float sn, cs;
+        foc_fast_sincos(phase, sn, cs);
+        // This is q in a fixed stator coordinate frame, not a measured rotor dq.
+        current_control(0.0f, 0.0f, amplitude * sn);
         return;
     }
     if (motor_state == DETECT_R) { update_resistance(); return; }
@@ -137,19 +160,21 @@ void control_sample()
     motor_fail(BAD_CONFIG);
 }
 
-bool start_motor(bool detect)
+bool start_motor(bool detect, bool music_test = false)
 {
     if (motor_state != IDLE || !limits_valid() || (!detect && !parameters_ready)) return false;
-    if (!detect && current_mode && iq_setpoint <= 0.0f) return false;
-    if (!detect && !current_mode && speed_setpoint <= 0.0f) return false;
+    if (music_test && motor_mode == MOTOR_BLDC) return false;
+    if (!detect && !music_test && current_mode && iq_setpoint <= 0.0f) return false;
+    if (!detect && !music_test && !current_mode && speed_setpoint <= 0.0f) return false;
     if (motor_mode == MOTOR_BLDC && (detect || !bldc_feedback_ready())) return false;
     if (static_cast<int32_t>(HAL_GetTick() - coast_until) < 0) return false;
     if (Udc_quant < cfg::min_bus || Udc_quant > cfg::max_bus) { motor_fail(BAD_BUS); return false; }
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
     detecting = detect;
-    run_requested = !detect;
+    run_requested = !detect && !music_test;
     if (detect) parameters_ready = false;
     bridge_off();
+    music_requested = music_test;
     motor_timer_foc(); // Bootstrap all three low sides before either drive starts.
     __HAL_TIM_SET_COUNTER(&htim1, 0u);
     if (HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE) != HAL_OK) {
