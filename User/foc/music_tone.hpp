@@ -5,7 +5,7 @@
 // The caller supplies the sine function and invokes next() once per ADC frame.
 namespace music_tone {
 const unsigned capacity = 16u;
-const float max_amplitude = 0.5f; // A peak, independent of ordinary IQ limits.
+const float max_amplitude = 2.0f; // A peak, independent of ordinary IQ limits.
 const float min_frequency = 80.0f, max_frequency = 1000.0f;
 const float two_pi = 6.2831853071795864769f;
 struct Note { float step, amplitude; uint32_t samples, edge; };

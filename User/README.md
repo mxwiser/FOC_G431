@@ -115,7 +115,7 @@ BLDC 的 `D` 参数辨识指令仍返回 `cmd=7`；辨识先切回 FOC。
 音乐趣味测试使用独立的 `N=<Hz>,<Iq峰值A>,<ms>` 音符命令，`N?` 查询/心跳，
 `S` 停止。固定电角度下由 ADC 电流环本地产生正负交替的 q 轴参考，
 状态号 `s=12`，只允许 FOC、IDLE 启动，无自动重启；普通 `IQ=` 规则保持原样。
-Python 播放器、兰花草开头测试简谱及用法见 [matlab/music](../matlab/music/README.md)。
+Python 播放器、Bad Apple 完整主旋律、兰花草测试简谱及用法见 [matlab/music](../matlab/music/README.md)。
 
 - 使用 Python / PyQt6 上位机：`python matlab/current_ui/current_ui.py`。
 - 串口工具栏下方的“控制算法”选择 Ortega-lambda / MXLEMMING / BLDC，点击“应用算法”。
