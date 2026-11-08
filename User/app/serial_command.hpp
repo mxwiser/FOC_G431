@@ -4,7 +4,7 @@
 enum SerialCommandType {
     SERIAL_NONE, SERIAL_START, SERIAL_STOP, SERIAL_DETECT,
     SERIAL_SET_IQ, SERIAL_SET_SPEED, SERIAL_SET_SPEED_LIMIT, SERIAL_SET_PHASES,
-    SERIAL_SET_MOTOR_MODE, SERIAL_MUSIC_NOTE, SERIAL_MUSIC_STATUS, SERIAL_INVALID
+    SERIAL_SET_MOTOR_MODE, SERIAL_MUSIC_NOTE, SERIAL_MUSIC_LIVE, SERIAL_MUSIC_STATUS, SERIAL_INVALID
 };
 struct SerialCommand { SerialCommandType type; float value, amplitude, duration_ms; };
 struct SerialCommandParser { char text[64]; uint8_t length; bool discarding; };
@@ -70,6 +70,14 @@ inline bool serial_command_feed(SerialCommandParser &parser, uint8_t byte,
                 !serial_command_number(parser.text, first + 1u, second, command.amplitude) ||
                 !serial_command_number(parser.text, second + 1u, length, command.duration_ms)) return true;
             command.type = SERIAL_MUSIC_NOTE; return true;
+        }
+        if (length >= 3 && (parser.text[0] == 'T' || parser.text[0] == 't') && parser.text[1] == '=') {
+            uint8_t comma = 2u;
+            while (comma < length && parser.text[comma] != ',') ++comma;
+            if (comma == length ||
+                !serial_command_number(parser.text, 2u, comma, command.value) ||
+                !serial_command_number(parser.text, comma + 1u, length, command.amplitude)) return true;
+            command.type = SERIAL_MUSIC_LIVE; return true;
         }
         uint8_t index;
         SerialCommandType type;

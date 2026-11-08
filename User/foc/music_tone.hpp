@@ -15,6 +15,9 @@ struct Player {
     uint32_t position, accepted, completed;
     float phase;
     bool running;
+    // Live MIDI tone: a persistent oscillator that bypasses the note queue.
+    bool live;
+    float live_hz, live_amp, live_current, live_phase;
 };
 
 inline bool make_note(float hz, float amps, float ms, float dt, Note &note)
@@ -39,6 +42,7 @@ inline void clear(Player &p)
 {
     p.read = p.write = p.count = 0u;
     p.position = 0u; p.phase = 0.0f; p.running = false;
+    p.live = false; p.live_hz = p.live_amp = p.live_current = p.live_phase = 0.0f;
     // Keep lifetime ACK counters so a cancelled note cannot look newly accepted.
 }
 inline bool enqueue(Player &p, const Note &note)
@@ -69,6 +73,45 @@ inline bool next(Player &p, float &phase, float &amplitude)
     p.phase += p.current.step;
     if (p.phase >= two_pi) p.phase -= two_pi;
     ++p.position;
+    return true;
+}
+
+inline bool valid_live(float hz, float amps, float dt)
+{
+    if (!(dt > 0.0f && dt <= 0.001f)) return false;
+    if (!(amps >= 0.0f && amps <= max_amplitude)) return false;
+    return (hz == 0.0f && amps == 0.0f) ||
+        (hz >= min_frequency && hz <= max_frequency && hz * dt <= 1.0f / 12.0f);
+}
+
+inline void set_live(Player &p, float hz, float amps)
+{
+    if (!p.live) {
+        // Switching from the queue to live drops any pending notes.
+        p.read = p.write = p.count = 0u;
+        p.running = false;
+        p.live_phase = 0.0f;
+        p.live_current = 0.0f;
+    }
+    p.live = true;
+    if (hz > 0.0f) p.live_hz = hz;
+    p.live_amp = amps;
+}
+
+// Persistent oscillator for live MIDI. Keeps phase across pitch changes and
+// ramps amplitude over ~10 ms so note edges do not click. Returns true even
+// while silent so the caller stays in MUSIC until a stop or heartbeat timeout.
+inline bool next_live(Player &p, float dt, float &phase, float &amplitude)
+{
+    if (!p.live) return false;
+    const float step = max_amplitude * dt / 0.01f;
+    const float error = p.live_amp - p.live_current;
+    if (error > step) p.live_current += step;
+    else if (error < -step) p.live_current -= step;
+    else p.live_current = p.live_amp;
+    phase = p.live_phase; amplitude = p.live_current;
+    p.live_phase += two_pi * p.live_hz * dt;
+    if (p.live_phase >= two_pi) p.live_phase -= two_pi;
     return true;
 }
 } // namespace music_tone

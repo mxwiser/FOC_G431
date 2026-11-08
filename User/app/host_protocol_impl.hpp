@@ -89,9 +89,26 @@ recover_uart:
             if (!music_tone::make_note(command.value, command.amplitude, command.duration_ms, sample_dt, note))
                 command_result = COMMAND_RANGE;
             else if (motor_mode == MOTOR_BLDC) command_result = COMMAND_UNSUPPORTED;
-            else if ((!music_requested && !start_motor(false, true)) ||
-                     !music_tone::enqueue(music_player, note)) command_result = COMMAND_BUSY;
-            else { command_result = COMMAND_OK; music_last_command_ms = data_port::milliseconds(); }
+            else {
+                music_player.live = false;
+                if ((!music_requested && !start_motor(false, true)) ||
+                    !music_tone::enqueue(music_player, note)) command_result = COMMAND_BUSY;
+                else { command_result = COMMAND_OK; music_last_command_ms = data_port::milliseconds(); }
+            }
+            music_command_result = command_result;
+            music_status_pending = true;
+        }
+        else if (command.type == SERIAL_MUSIC_LIVE) {
+            if (!music_tone::valid_live(command.value, command.amplitude, sample_dt))
+                command_result = COMMAND_RANGE;
+            else if (motor_mode == MOTOR_BLDC) command_result = COMMAND_UNSUPPORTED;
+            else if (!music_requested && command.amplitude <= 0.0f) command_result = COMMAND_OK;
+            else if (!music_requested && !start_motor(false, true)) command_result = COMMAND_BUSY;
+            else {
+                music_tone::set_live(music_player, command.value, command.amplitude);
+                command_result = COMMAND_OK;
+                music_last_command_ms = data_port::milliseconds();
+            }
             music_command_result = command_result;
             music_status_pending = true;
         }

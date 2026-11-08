@@ -106,7 +106,9 @@ void control_sample()
             return;
         }
         float phase, amplitude;
-        if (!music_tone::next(music_player, phase, amplitude)) {
+        if (music_player.live) {
+            music_tone::next_live(music_player, sample_dt, phase, amplitude);
+        } else if (!music_tone::next(music_player, phase, amplitude)) {
             bridge_off(); coast_until = data_port::milliseconds() + 2000u; enter_state(IDLE);
             return;
         }
